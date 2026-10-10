@@ -7,7 +7,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # 本独立仓库的默认分支是 master（社区仓库 magpie-community/plugins 用 main）。
+    # 将来并回社区仓库时，这里改回 main 即可；两个分支都跑也没害处，只是重复一次门禁。
+    branches: [master]
   pull_request:
 
 permissions:
