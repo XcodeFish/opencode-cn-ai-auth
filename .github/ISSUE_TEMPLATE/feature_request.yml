@@ -1,0 +1,72 @@
+# 功能请求 / 新厂商请求：结构与 README「提交 Issue」一节一致。
+# 先问问题与场景，再问方案 —— 免得报告把「想要的实现」当成「要解决的问题」。
+name: 功能请求 / 新厂商
+description: 想要新能力，或要把另一家厂商接进来
+title: "[feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **不要贴 token、手机号原文或 AccessKey**。
+  - type: textarea
+    id: want
+    attributes:
+      label: 想要什么
+      description: 一句话说明要解决的问题，而不是先给方案
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 场景
+      description: 什么情况下需要，现状怎么绕
+    validations:
+      required: true
+  - type: checkboxes
+    id: vendor-request
+    attributes:
+      label: 这是新厂商请求吗
+      options:
+        - label: 是，我需要接入一家新的厂商
+          required: false
+  - type: input
+    id: vendor-name
+    attributes:
+      label: 厂商与产品名
+      placeholder: 例如 智谱 GLM Coding Plan
+    validations:
+      required: false
+  - type: input
+    id: vendor-client
+    attributes:
+      label: 客户端 / CLI 下载地址
+      placeholder: https://…
+    validations:
+      required: false
+  - type: dropdown
+    id: vendor-signin
+    attributes:
+      label: 登录方式
+      options:
+        - 微信扫码
+        - 短信验证码
+        - 设备码 / 浏览器回调
+        - API key
+        - 其他（在下方说明）
+    validations:
+      required: false
+  - type: textarea
+    id: vendor-quota
+    attributes:
+      label: 订阅与额度类型
+      description: 有无每日额度、额度用完后是否回落到另一个池子、token 能否续期
+    validations:
+      required: false
+  - type: textarea
+    id: vendor-models
+    attributes:
+      label: 模型列表与倍率
+      description: 是否有一个账号级接口能读到模型与倍率；若有，请给出端点与一份脱敏响应
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,83 @@
+# GitHub 的 Issue 表单：与 README「提交 Issue」一节同结构。
+# 表单比自由文本更难漏字段，也就更难出现「信息不足无法复现」的报告。
+name: Bug 报告
+description: 插件行为与预期不符时使用
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提 issue 前先跑一次 `bun run verify` 并把结果贴上。
+        **不要贴 token、手机号原文或 AccessKey**；账号相关只写 provider id 与错误码。
+  - type: input
+    id: package-version
+    attributes:
+      label: 本包版本 / commit
+      placeholder: 0.1.0 或 git rev-parse --short HEAD 的输出
+    validations:
+      required: true
+  - type: input
+    id: magpie-version
+    attributes:
+      label: magpie 版本（`magpie --version`）
+      placeholder: 0.1.1137
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS 与 Bun 版本
+      placeholder: macOS 15.6 / bun 1.4.2
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: provider id
+      options:
+        - loomy
+        - raccoon
+    validations:
+      required: true
+  - type: dropdown
+    id: signin
+    attributes:
+      label: 登录方式
+      options:
+        - 微信扫码
+        - 短信验证码
+        - 不涉及（模型 / 额度 / 续期）
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么，期望是什么
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: "`bun run verify` 结果、`magpie plugin --json`（去掉账号信息）、日志（前缀 `<vendor>: `）。不要贴 token / 手机号原文。"
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: scope
+    attributes:
+      label: 影响范围
+      description: 单账号还是多账号、哪些模型、是否有绕过办法
+    validations:
+      required: false

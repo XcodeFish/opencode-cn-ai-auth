@@ -1,0 +1,33 @@
+# 每次 push / PR 跑一遍全量门禁：类型、格式、离线测试、入口形状与依赖方向。
+#
+# 与社区仓库（magpie-community/plugins）的 pr.yml 同口径，包括测试用临时 HOME：
+# 本包不读用户目录（凭据只来自插件选项或环境变量），把 HOME 指到空目录是把这条
+# 约定固定下来——将来若有人不小心让测试或自检读了真实主目录里的登录态，这里会红。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: install
+        # 锁定文件是要提交的契约：CI 用 --frozen-lockfile 才拦得住「本地装了新依赖
+        # 但没更新 bun.lock」这类只在别人机器上炸的问题。
+        run: bun install --frozen-lockfile
+      - name: verify
+        # 类型 → 格式 → 测试 → 入口形状与依赖方向，和本地 bun run verify 同一条命令，
+        # 避免 CI 与本地跑的不是同一套规则。
+        run: HOME="$(mktemp -d)" bun run verify

@@ -1,0 +1,28 @@
+# 文档问题：本包的原则是「写不出处的数字不写」，所以这个表单只问两件事 ——
+# 哪句话不对，以及支持正确说法的出处。
+name: 文档问题
+description: 文档与事实不符，或缺少关键说明
+title: "[docs] "
+body:
+  - type: input
+    id: where
+    attributes:
+      label: 哪份文档的哪一句
+      placeholder: docs/vendors.md「Loomy 的 14 天会话寿命…」
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: 与事实哪里不符
+      description: 现在写的、实际的、以及你怎么发现的
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 出处
+      description: 源码文件与行、端点、实测日期、上游版本 —— 至少给一项
+      render: text
+    validations:
+      required: true
