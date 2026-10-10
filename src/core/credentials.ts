@@ -6,11 +6,16 @@
  * account endpoints (account.xfinfr.com) are signed with an AccessKey the
  * Loomy client carries in its bundle, and Raccoon's SMS endpoints take the
  * phone number encrypted under a key from its renderer bundle. Neither is a
- * user secret — both are readable by anyone with the client — but they are
- * the vendor's constants, not this package's, so they are never baked in
- * here.
+ * user secret — both are readable by anyone with the client.
  *
- * A vendor asks for them in this order:
+ * Raccoon's is left to the user, because nothing here needs it until someone
+ * asks for SMS sign-in. Loomy's is not optional that way — QR sign-in has to
+ * work on a fresh install — so that one pair is baked in on purpose, in
+ * `vendors/loomy/bundled-credentials.ts`, and is the single exception to
+ * "a vendor's constants are never baked in"; `docs/conventions.md` §7 records
+ * what that exception costs.
+ *
+ * Every other vendor constant is resolved in this order:
  *
  * 1. `options` — the object magpie stores on the plugin entry
  *    (`magpie plugin options <name> '{"accessKeyId": "…"}'`, one object shared

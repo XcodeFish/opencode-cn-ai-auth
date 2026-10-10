@@ -30,16 +30,24 @@ Loomy（讯飞）与 Raccoon（商汤小浣熊）的协议事实——端点路�
 注释重写。除 `src/core/qr.ts` 外，本包没有按文件拷贝 JetHub 的源码；逐项来源（哪个值
 取自哪个文件、哪些属于本包的假设）记录在 `docs/vendors.md`。
 
-## 本包不含厂商密钥
+## 厂商密钥：内嵌一组，其余由使用者提供
 
-本包**不包含任何厂商的密钥常量**：
+本包**内嵌一组厂商客户端常量**，除此之外不含任何厂商密钥：
 
-- 讯飞账号 AccessKey（AccessKeyId / AccessKeySecret）：仅用于 `account.xfinfr.com`
-  的签名请求。
-- 商汤手机号加密密钥：仅用于 Raccoon 的短信登录请求。
+- **Loomy 客户端 AccessKey**（`accessKeyId` / `accessKeySecret`）：**随包内嵌**在
+  `src/vendors/loomy/bundled-credentials.ts`，用于 `account.xfinfr.com` 的签名请求
+  ——微信扫码登录，以及首次扫码后的手机号绑定。这对值随官方 Loomy 桌面客户端分发，
+  任何人从客户端里都能读出同一对值，**不是使用者的账号凭据**；但它属于厂商，厂商旋转
+  或吊销它会让这条登录路径失效，届时需要同步更新本包。
+- **讯飞账号 AccessKey**（仅用于可选的独立短信登录）：**不内嵌**，必须由使用者提供
+  ——写进插件条目的 options（`accessKeyId` / `accessKeySecret`），或设为环境变量
+  `LOOMY_XFYUN_ACCESS_KEY_ID` / `LOOMY_XFYUN_ACCESS_KEY_SECRET`。
+- **商汤手机号加密密钥**（`phoneCipherSecret`）：**不内嵌**，必须由使用者提供——写进
+  插件条目的 options，或设为环境变量 `RACCOON_PHONE_CIPHER_SECRET`；未配置时短信登录
+  方式不注册。
 
-两者都必须由使用者提供——写进插件条目的 options，或设为对应的环境变量；变量名与取值
-方式见 `docs/vendors.md`，读取顺序的实现见 `src/core/credentials.ts`。
+以上取值顺序的实现见 `src/core/credentials.ts`，变量名与从哪里读见 `docs/vendors.md`，
+内嵌这一组常量的取舍与风险见 `docs/conventions.md` §7。
 
 ## 运行时从第三方加载、未随本包分发
 
