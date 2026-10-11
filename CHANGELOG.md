@@ -2,6 +2,22 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.2.0] - 2026-10-11
+
+### Added
+
+- 增加 OpenCode V2 适配层：`opencode/loomy` 与 `opencode/raccoon` 导出标准的
+  `{ id, setup }` 插件对象，注册模型、登录方式、请求鉴权和凭据续期。
+- 增加 OpenCode 适配器、登录、页面隔离和 QR/SMS 状态机的回归测试。
+
+### Fixed
+
+- 修复 Loomy 非 2xx 响应被当作空模型目录的问题，区分登录失效与供应商错误。
+- 修复 Raccoon 短信并发请求覆盖状态的问题，增加 generation、过期请求和幂等验证保护。
+- 修复 Loomy QR 绑定在二维码换代、旧页面和结算后仍可提交的问题。
+- 将 Raccoon 验证码脚本移入 opaque-origin sandbox iframe，并增加 CSP 与严格消息校验。
+- 更新文档和发布元数据，明确 Magpie 根入口与 OpenCode V2 子入口的兼容范围。
+
 ## [0.1.0] - 2026-10-09
 
 ### Added

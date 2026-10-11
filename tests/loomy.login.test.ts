@@ -338,6 +338,16 @@ describe("微信扫码流程", () => {
     expect(result.accountId).toBe("138****5678")
     expect(result.refresh).toBe("")
 
+    // A delayed browser action must not mutate the settled flow or send a
+    // second binding request after the QR login has completed.
+    const late = await fetch(new URL("phone", started.url ?? ""), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone: "13812345678" }),
+    })
+    expect(late.status).toBe(409)
+    expect(fetcher.callsMatching("/login/thirdAccount/bind/sendMsg")).toHaveLength(0)
+
     // QR uses its bundled client key even when optional SMS credentials are configured.
     const bindCall = fetcher.callsMatching("/login/thirdAccount/bind/auth")
     expect(bindCall).toHaveLength(1)
@@ -378,18 +388,30 @@ describe("微信扫码流程", () => {
       }
       expect(fetcher.callsMatching("/login/thirdAccount/bind/auth")).toHaveLength(1)
       await tick(10)
+      const state = (await (await fetch(new URL("state", pageUrl))).json()) as {
+        generation: number
+        uuid: string
+      }
 
       const send = await fetch(new URL("phone", pageUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ phone: "13812345678" }),
+        body: JSON.stringify({
+          phone: "13812345678",
+          generation: state.generation,
+          uuid: state.uuid,
+        }),
       })
       expect(await send.json()).toMatchObject({ ok: true })
 
       const verify = await fetch(new URL("verify", pageUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: "123456" }),
+        body: JSON.stringify({
+          code: "123456",
+          generation: state.generation,
+          uuid: state.uuid,
+        }),
       })
       expect(await verify.json()).toMatchObject({ ok: true })
 
@@ -408,5 +430,50 @@ describe("微信扫码流程", () => {
         expect(headersOf(at(calls, 0)).Authorization).toMatch(/^account [^:]+:[A-Za-z0-9+/=]+$/)
       }
     })
+  }, 10_000)
+
+  test("二维码换代后，旧页面的绑定请求返回 409 且不再发短信", async () => {
+    const fetcher = wechatFetcher(["wx_errcode=405; wx_code='CODE-1';", "wx_errcode=402;"], false)
+    const method = oauthMethod(
+      loginMethods({ client: fakeClient(), options: {}, fetcher, signInTimeoutMs: 2_500 }),
+      0,
+    )
+    const started = await method.authorize()
+    const pageUrl = started.url
+    if (pageUrl === undefined) throw new Error("扫码流程没有返回本地页面地址")
+
+    for (
+      let attempt = 0;
+      attempt < 100 && fetcher.callsMatching("/login/thirdAccount/bind/auth").length === 0;
+      attempt++
+    ) {
+      await tick(1)
+    }
+    expect(fetcher.callsMatching("/login/thirdAccount/bind/auth")).toHaveLength(1)
+    const oldState = (await (await fetch(new URL("state", pageUrl))).json()) as {
+      generation: number
+      uuid: string
+    }
+    for (
+      let attempt = 0;
+      attempt < 100 && fetcher.callsMatching("long.open.weixin.qq.com").length < 2;
+      attempt++
+    ) {
+      await tick(1)
+    }
+    await tick(5)
+
+    const late = await fetch(new URL("phone", pageUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        phone: "13812345678",
+        generation: oldState.generation,
+        uuid: oldState.uuid,
+      }),
+    })
+    expect(late.status).toBe(409)
+    expect(fetcher.callsMatching("/login/thirdAccount/bind/sendMsg")).toHaveLength(0)
+    expect((await started.callback()).type).toBe("failed")
   }, 10_000)
 })

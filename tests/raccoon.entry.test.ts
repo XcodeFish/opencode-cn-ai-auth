@@ -30,10 +30,76 @@ describe("插件入口", () => {
     expect(loomy.auth.refresh).toBeUndefined()
   })
 
-  test("OpenCode 子入口各自只暴露一个 server", () => {
-    expect(loomyOpenCode.id).toBe("opencode-cn-ai-loomy")
-    expect(typeof loomyOpenCode.server).toBe("function")
-    expect(raccoonOpenCode.id).toBe("opencode-cn-ai-raccoon")
-    expect(typeof raccoonOpenCode.server).toBe("function")
+  test("OpenCode 子入口遵守 V2 的 id/setup 契约", async () => {
+    expect(loomyOpenCode.id).toBe("loomy")
+    expect(typeof loomyOpenCode.setup).toBe("function")
+    expect("server" in loomyOpenCode).toBe(false)
+    expect(raccoonOpenCode.id).toBe("raccoon")
+    expect(typeof raccoonOpenCode.setup).toBe("function")
+    expect("server" in raccoonOpenCode).toBe(false)
+
+    const loomyAdded: { info: Record<string, unknown>; models: readonly Record<string, unknown>[] }[] = []
+    const raccoonAdded: { info: Record<string, unknown>; models: readonly Record<string, unknown>[] }[] = []
+    const hooks: ((event: unknown) => void | Promise<void>)[] = []
+    const integrationUpdates: {
+      integrationID: string
+      method: Record<string, unknown>
+      authorize?: unknown
+    }[] = []
+    await loomyOpenCode.setup({
+      options: { accessToken: "loomy-session" },
+      provider: { transform: async (callback) => callback({ add: (input) => loomyAdded.push(input) }) },
+      session: { hook: async (_name, callback) => void hooks.push(callback) },
+      integration: {
+        transform: async (callback) =>
+          callback({ method: { update: (input) => integrationUpdates.push(input) } }),
+      },
+    })
+    await raccoonOpenCode.setup({
+      options: { accessToken: "raccoon-token", officeIdentity: "org-1" },
+      provider: { transform: async (callback) => callback({ add: (input) => raccoonAdded.push(input) }) },
+      session: { hook: async (_name, callback) => void hooks.push(callback) },
+      integration: {
+        transform: async (callback) =>
+          callback({ method: { update: (input) => integrationUpdates.push(input) } }),
+      },
+    })
+
+    expect(loomyAdded[0]?.info).toMatchObject({
+      id: "loomy",
+      settings: { baseURL: "https://loomyad.xunfei.cn/api/v1" },
+      headers: { Authorization: "Bearer loomy-session", token: "loomy-session" },
+    })
+    expect(loomyAdded[0]?.models.length).toBeGreaterThan(0)
+    expect(raccoonAdded[0]?.info).toMatchObject({
+      id: "raccoon",
+      settings: { baseURL: "https://xiaohuanxiong.com/api/web/llm/v2" },
+      headers: {
+        Authorization: "Bearer raccoon-token",
+        token: "raccoon-token",
+        "X-Org-Code": "org-1",
+      },
+    })
+    const raccoonModel = raccoonAdded[0]?.models.find((model) => model.id === "sn-sensenova-6-8-flash")
+    expect(raccoonModel?.variants).toContainEqual({
+      id: "none",
+      body: { extra_body: { thinking: { type: "disabled" } } },
+    })
+    expect(hooks).toHaveLength(2)
+    expect(integrationUpdates.filter((update) => update.integrationID === "loomy")).toHaveLength(3)
+    expect(integrationUpdates.filter((update) => update.integrationID === "raccoon")).toHaveLength(3)
+    const loomyOAuth = integrationUpdates.find(
+      (update) => update.integrationID === "loomy" && update.method.type === "oauth",
+    )
+    expect(typeof loomyOAuth?.authorize).toBe("function")
+    expect(integrationUpdates.some((update) => update.method.type === "env")).toBe(true)
+    expect(integrationUpdates.some((update) => update.method.type === "key")).toBe(true)
+
+    const request = {
+      request: { url: "https://loomyad.xunfei.cn/api/v1/chat/completions", headers: new Headers() },
+    }
+    await hooks[0]?.(request)
+    expect(request.request.headers.get("authorization")).toBe("Bearer loomy-session")
+    expect(request.request.headers.get("token")).toBe("loomy-session")
   })
 })

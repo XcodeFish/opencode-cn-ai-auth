@@ -1,14 +1,21 @@
 /**
- * Direct OpenCode entry point for the Loomy provider.
+ * OpenCode V2 entry point for Loomy.
  *
- * Magpie loads the package root and discovers both named factories. OpenCode
- * loads one `server` module, so each vendor has an explicit subpath instead
- * of pretending that two auth hooks can be merged into one OpenCode hook.
+ * This is intentionally separate from the Magpie factory at the package root:
+ * OpenCode loads a module with `{ id, setup }`, while Magpie loads the two
+ * named factories exported by `index.ts`.
  */
 
-import { LoomyAuthPlugin } from "../src/vendors/loomy/index.ts"
+import { loginMethods } from "../src/vendors/loomy/login.ts"
+import { fallbackModels } from "../src/vendors/loomy/models.ts"
+import { LOOMY_API_BASE, LOOMY_ID, LOOMY_NAME } from "../src/vendors/loomy/product.ts"
+import { openCodePlugin } from "./adapter.ts"
 
-export default {
-  id: "opencode-cn-ai-loomy",
-  server: LoomyAuthPlugin,
-}
+export default openCodePlugin({
+  id: LOOMY_ID,
+  name: LOOMY_NAME,
+  baseURL: LOOMY_API_BASE,
+  env: "LOOMY_SESSION",
+  models: fallbackModels(),
+  authMethods: (options, client) => loginMethods({ options, client, fetcher: fetch }),
+})

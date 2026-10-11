@@ -22,6 +22,8 @@ export interface PageRequest {
 export interface PageResponse {
   status?: number
   contentType?: string
+  /** Package-owned policy override for an isolated vendor SDK document. */
+  contentSecurityPolicy?: string
   body: string
 }
 
@@ -113,7 +115,13 @@ async function handle(
         return parsed
       },
     })
-    write(response, result.status ?? 200, result.contentType ?? JSON_TYPE, result.body)
+    write(
+      response,
+      result.status ?? 200,
+      result.contentType ?? JSON_TYPE,
+      result.body,
+      result.contentSecurityPolicy,
+    )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     write(response, 500, "text/plain; charset=utf-8", `internal error: ${message}`)
@@ -143,12 +151,18 @@ function write(
   status: number,
   contentType: string,
   body: string,
+  contentSecurityPolicy?: string,
 ): void {
   response.writeHead(status, {
     "content-type": contentType,
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
+    // The page owns only its loopback API. Third-party browser code, when a
+    // vendor needs it, runs in a separate opaque-origin sandboxed iframe.
+    "content-security-policy":
+      contentSecurityPolicy ??
+      "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; child-src 'self'",
   })
   response.end(body)
 }

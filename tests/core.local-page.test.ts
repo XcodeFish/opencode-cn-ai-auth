@@ -32,6 +32,8 @@ describe("PageServer", () => {
       expect(response.headers.get("content-type")).toBe(HTML)
       expect(response.headers.get("cache-control")).toBe("no-store")
       expect(response.headers.get("x-content-type-options")).toBe("nosniff")
+      expect(response.headers.get("content-security-policy")).toContain("frame-src 'self'")
+      expect(response.headers.get("content-security-policy")).toContain("connect-src 'self'")
       expect(await response.text()).toBe("<h1>hi</h1>")
       expect(seen).toStrictEqual([{ method: "GET", path: "/", query: { a: "1", b: "two" } }])
 

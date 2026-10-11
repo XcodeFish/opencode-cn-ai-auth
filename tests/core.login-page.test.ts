@@ -6,7 +6,13 @@
 
 import { describe, expect, test } from "bun:test"
 import { JSON_TYPE } from "../src/core/local-page.ts"
-import { jsonFail, jsonOk, renderLoginPage } from "../src/core/login-page.ts"
+import {
+  jsonFail,
+  jsonOk,
+  renderLoginPage,
+  renderSandboxedScriptFrame,
+  renderSandboxedScriptPage,
+} from "../src/core/login-page.ts"
 
 function externalCount(html: string): number {
   return html.split('src="http').length - 1
@@ -65,6 +71,31 @@ describe("renderLoginPage", () => {
       renderLoginPage({ title: "T", body: "", script: "", scripts: ["http://evil.test/x.js"] }),
     ).toThrow("https")
     expect(() => renderLoginPage({ title: "T", body: "", script: "", accent: "red" })).toThrow("hex color")
+  })
+
+  test("第三方验证码脚本只出现在 opaque-origin sandbox iframe", () => {
+    const html = renderSandboxedScriptFrame({
+      id: "captcha-frame",
+      title: "验证码",
+      path: "captcha",
+    })
+    expect(html).toContain('sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"')
+    expect(html).toContain('src="captcha"')
+    expect(externalCount(html)).toBe(0)
+    const child = renderSandboxedScriptPage({
+      source: "https://cdn.example.com/captcha.js",
+      body: '<div id="captcha"></div>',
+      bootstrap: 'window.parent.postMessage({ type: "ready" }, "*");',
+    })
+    expect(child.contentSecurityPolicy).toContain("sandbox allow-scripts")
+    expect(child.body).toContain('<script src="https://cdn.example.com/captcha.js"></script>')
+    expect(() =>
+      renderSandboxedScriptPage({
+        source: "https://user:pass@cdn.example.com/captcha.js",
+        body: "",
+        bootstrap: "",
+      }),
+    ).toThrow("public https")
   })
 })
 

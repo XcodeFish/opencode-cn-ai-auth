@@ -18,7 +18,7 @@ import {
   productRead,
   sendSmsCode,
 } from "../src/vendors/loomy/api.ts"
-import { at, cannedFetch, headersOf, jsonOk, rejectionError, textBody } from "./helpers.ts"
+import { at, cannedFetch, headersOf, jsonFail, jsonOk, rejectionError, textBody } from "./helpers.ts"
 
 const ACCESS = "sess-1"
 const KEYS = { accessKeyId: "ak-test", accessKeySecret: "sk-test" }
@@ -251,6 +251,23 @@ describe("fetchCatalog", () => {
     const error = await rejectionError(() => fetchCatalog(fetcher, ACCESS))
     expect(error).toBeInstanceOf(SignInExpiredError)
     expect(error.message).toBe("loomy: 模型列表被拒绝：缺少 token")
+  })
+
+  test("非 legacy 的 HTTP 401 也必须标记登录态失效", async () => {
+    const fetcher = cannedFetch([
+      { match: "/models", respond: jsonFail({ error: { message: "unauthorized" } }, 401) },
+    ])
+    const error = await rejectionError(() => fetchCatalog(fetcher, ACCESS))
+    expect(error).toBeInstanceOf(SignInExpiredError)
+    expect(error.message).toContain("loomy: 模型列表被拒绝")
+  })
+
+  test("非 2xx 的普通 JSON 不会被吞成空模型目录", async () => {
+    const fetcher = cannedFetch([{ match: "/models", respond: jsonFail({ error: "upstream" }, 503) }])
+    const error = await rejectionError(() => fetchCatalog(fetcher, ACCESS))
+    expect(error).toBeInstanceOf(VendorError)
+    expect((error as VendorError).status).toBe(503)
+    expect(error.message).toContain("HTTP 503")
   })
 })
 

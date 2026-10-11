@@ -133,6 +133,10 @@ interface FlowState {
   phase: FlowPhase
   message: string
   qr: string
+  /** Monotonically increases whenever a new QR is issued. */
+  generation: number
+  /** The QR identity the browser must echo on binding mutations. */
+  uuid: string
 }
 
 /**
@@ -141,6 +145,9 @@ interface FlowState {
  * the browser learns is the answer to the request it just made.
  */
 interface BindState {
+  /** The QR generation and uuid this binding belongs to. */
+  generation: number
+  uuid: string
   /** The code `bind/auth` handed out for this scan. */
   rcode: string
   /** The number the service accepted a send for. */
@@ -149,6 +156,10 @@ interface BindState {
   smsSent: boolean
   /** The `msgid` of that send, which the check needs. */
   msgid?: string
+  sending?: boolean
+  verifying?: boolean
+  verifyPromise?: Promise<PageResponse>
+  lastVerifyResponse?: PageResponse
 }
 
 const PHASE_TEXT: Record<FlowPhase, string> = {
@@ -163,7 +174,11 @@ const PHASE_TEXT: Record<FlowPhase, string> = {
 
 function renderQrPage(state: FlowState): string {
   const script = `
+  var bindGeneration = 0;
+  var bindUuid = "";
   var stop = cnPoll("state", function (next) {
+    bindGeneration = Number(next.generation) || 0;
+    bindUuid = typeof next.uuid === "string" ? next.uuid : "";
     var image = document.getElementById("cn-qr-img");
     if (next.qr && image && image.getAttribute("src") !== next.qr) image.src = next.qr;
     var bind = document.getElementById("cn-bind");
@@ -179,14 +194,22 @@ function renderQrPage(state: FlowState): string {
   var send = document.getElementById("cn-send");
   if (send) send.addEventListener("click", function () {
     cnStatus("cn-status", "正在发送验证码…");
-    cnPost("phone", { phone: document.getElementById("cn-phone").value.trim() })
+    cnPost("phone", {
+      phone: document.getElementById("cn-phone").value.trim(),
+      generation: bindGeneration,
+      uuid: bindUuid
+    })
       .then(function (data) { cnStatus("cn-status", data.message || "验证码已发送", "ok"); })
       .catch(function (e) { cnStatus("cn-status", e.message || "发送失败", "err"); });
   });
   var verify = document.getElementById("cn-verify");
   if (verify) verify.addEventListener("click", function () {
     cnStatus("cn-status", "正在验证…");
-    cnPost("verify", { code: document.getElementById("cn-code").value.trim() })
+    cnPost("verify", {
+      code: document.getElementById("cn-code").value.trim(),
+      generation: bindGeneration,
+      uuid: bindUuid
+    })
       .then(function () { cnDone(stop, "登录成功，可以关闭此页面"); })
       .catch(function (e) { cnStatus("cn-status", e.message || "验证失败", "err"); });
   });
@@ -220,45 +243,124 @@ function renderQrPage(state: FlowState): string {
  */
 async function bindPhoneRequest(
   deps: LoomyLoginDeps,
-  bind: BindState,
+  session: WechatSession,
   request: PageRequest,
 ): Promise<PageResponse> {
+  const bind = session.bind
   const body = await request.json()
+  const identity = bindRequestIdentity(body)
+  if (identity === undefined) return jsonFail("二维码已刷新，请重新扫码", 409)
+  const { generation, uuid } = identity
+  const invalid = bindMutationError(session, generation, uuid)
+  if (invalid !== undefined) return invalid
+  if (bind.sending) return jsonFail("验证码发送中，请稍候", 409)
   const phone = mainlandPhone(typeof body.phone === "string" ? body.phone : undefined)
   if (phone === undefined) return jsonFail("请输入有效的 11 位手机号")
-  if (bind.rcode.length === 0) return jsonFail("还没有扫码完成，请先扫码")
+  // Any prior SMS result is invalid as soon as a new send begins.
+  bind.phone = ""
+  delete bind.msgid
+  bind.smsSent = false
+  bind.sending = true
   try {
-    bind.msgid = await bindSendMsg(deps.fetcher, LOOMY_CLIENT_ACCESS_KEYS, { rcode: bind.rcode, phone })
+    const msgid = await bindSendMsg(deps.fetcher, LOOMY_CLIENT_ACCESS_KEYS, { rcode: bind.rcode, phone })
+    const stale = bindMutationError(session, generation, uuid)
+    if (stale !== undefined) return stale
+    bind.msgid = msgid
     bind.phone = phone
     bind.smsSent = true
     return jsonOk({ message: `验证码已发送到 ${maskPhone(phone)}` })
   } catch (error) {
+    if (session.state.generation !== generation || session.uuid !== uuid) {
+      return jsonFail("发送请求已过期，请重新扫码", 409)
+    }
+    delete bind.msgid
+    bind.smsSent = false
     return jsonFail(errorMessage(error))
+  } finally {
+    if (session.state.generation === generation && session.uuid === uuid) bind.sending = false
   }
 }
 
 /** Checks the code, and a success is the sign-in. */
 async function bindVerifyRequest(
   deps: LoomyLoginDeps,
-  bind: BindState,
+  session: WechatSession,
   request: PageRequest,
   complete: (login: { access: string; userid: string; phone?: string }) => void,
 ): Promise<PageResponse> {
+  const bind = session.bind
   const body = await request.json()
+  const identity = bindRequestIdentity(body)
+  if (identity === undefined) return jsonFail("二维码已刷新，请重新扫码", 409)
   const code = typeof body.code === "string" ? body.code.trim() : ""
   if (code.length === 0) return jsonFail("请输入短信验证码")
+  const { generation, uuid } = identity
+  const invalid = bindMutationError(session, generation, uuid)
+  if (invalid !== undefined) return invalid
+  if (bind.verifying && bind.verifyPromise !== undefined) return await bind.verifyPromise
   if (!bind.smsSent || bind.msgid === undefined) return jsonFail("请先获取验证码")
-  try {
-    const login = await bindCheckCode(deps.fetcher, LOOMY_CLIENT_ACCESS_KEYS, {
-      rcode: bind.rcode,
-      code,
-      msgid: bind.msgid,
-    })
-    complete(login)
-    return jsonOk()
-  } catch (error) {
-    return jsonFail(errorMessage(error))
+  if (bind.verifying) return jsonFail("验证码验证中，请稍候", 409)
+  const input = { rcode: bind.rcode, code, msgid: bind.msgid }
+  bind.verifying = true
+  const operation = (async (): Promise<PageResponse> => {
+    let response: PageResponse
+    try {
+      const login = await bindCheckCode(deps.fetcher, LOOMY_CLIENT_ACCESS_KEYS, input)
+      const stale = bindMutationError(session, generation, uuid)
+      if (stale !== undefined) {
+        response = stale
+      } else {
+        complete(login)
+        response = jsonOk()
+      }
+    } catch (error) {
+      response = jsonFail(errorMessage(error))
+    }
+    if (session.state.generation === generation && session.uuid === uuid) {
+      bind.lastVerifyResponse = response
+      delete bind.verifyPromise
+      bind.verifying = false
+    }
+    return response
+  })()
+  bind.verifyPromise = operation
+  return await operation
+}
+
+function bindRequestIdentity(
+  body: Record<string, unknown>,
+): { generation: number; uuid: string } | undefined {
+  const generation = body.generation
+  const uuid = typeof body.uuid === "string" ? body.uuid : ""
+  if (
+    typeof generation !== "number" ||
+    !Number.isSafeInteger(generation) ||
+    generation < 1 ||
+    uuid.length === 0
+  ) {
+    return undefined
   }
+  return { generation, uuid }
+}
+
+/** Reject mutations after settlement or when a request belongs to an old QR. */
+function bindMutationError(
+  session: WechatSession,
+  generation: number,
+  uuid: string,
+): PageResponse | undefined {
+  if (
+    session.settled() ||
+    session.state.phase !== "bind" ||
+    session.state.generation !== generation ||
+    session.uuid !== uuid ||
+    session.bind.generation !== generation ||
+    session.bind.uuid !== uuid
+  ) {
+    return jsonFail("登录流程已结束或二维码已刷新，请重新扫码", 409)
+  }
+  if (session.bind.rcode.length === 0) return jsonFail("还没有扫码完成，请先扫码")
+  return undefined
 }
 
 interface StartedFlow {
@@ -292,6 +394,15 @@ interface WechatSession {
 async function confirmedStep(session: WechatSession, code: string): Promise<"done" | "bind"> {
   const keys = LOOMY_CLIENT_ACCESS_KEYS
   const bound = await bindWechat(session.deps.fetcher, keys, code)
+  session.bind.generation = session.state.generation
+  session.bind.uuid = session.uuid
+  session.bind.phone = ""
+  delete session.bind.msgid
+  session.bind.smsSent = false
+  session.bind.sending = false
+  session.bind.verifying = false
+  delete session.bind.verifyPromise
+  delete session.bind.lastVerifyResponse
   session.bind.rcode = bound.rcode
   if (bound.bound) {
     session.settle(await bindSkip(session.deps.fetcher, keys, bound.rcode))
@@ -304,8 +415,26 @@ async function confirmedStep(session: WechatSession, code: string): Promise<"don
 
 /** An expired QR: draw the next one, say so, then wait again. */
 async function reissueQr(session: WechatSession): Promise<void> {
+  const generation = session.state.generation + 1
+  // Invalidate the old QR before awaiting the replacement. Late page
+  // requests therefore fail even while the new QR is being fetched.
+  session.state.generation = generation
+  session.bind.generation = generation
+  session.bind.uuid = ""
+  session.state.uuid = ""
+  session.bind.rcode = ""
+  session.bind.phone = ""
+  delete session.bind.msgid
+  session.bind.smsSent = false
+  session.bind.sending = false
+  session.bind.verifying = false
+  delete session.bind.verifyPromise
+  delete session.bind.lastVerifyResponse
   const next = await fetchWechatQr(session.deps.fetcher, randomId())
+  if (session.settled() || session.state.generation !== generation) return
   session.uuid = next.uuid
+  session.bind.uuid = next.uuid
+  session.state.uuid = next.uuid
   session.state.qr = next.image
   session.state.phase = "expired"
   session.state.message = PHASE_TEXT.expired
@@ -366,8 +495,10 @@ async function startWechat(deps: LoomyLoginDeps): Promise<StartedFlow> {
     phase: "waiting",
     message: PHASE_TEXT.waiting,
     qr: first.image,
+    generation: 1,
+    uuid: first.uuid,
   }
-  const bind: BindState = { rcode: "", phone: "", smsSent: false }
+  const bind: BindState = { generation: 1, uuid: first.uuid, rcode: "", phone: "", smsSent: false }
   let closed = false
 
   const close = (): void => {
@@ -407,17 +538,26 @@ async function startWechat(deps: LoomyLoginDeps): Promise<StartedFlow> {
   }
 
   const server = await PageServer.start(async (request: PageRequest) => {
+    if (settlement.settled && request.method === "POST") {
+      return jsonFail("登录流程已结束，请重新发起登录", 409)
+    }
     if (request.method === "GET" && request.path === "/") {
       return { contentType: "text/html; charset=utf-8", body: renderQrPage(state) }
     }
     if (request.method === "GET" && request.path === "/state") {
-      return jsonOk({ phase: state.phase, message: state.message, qr: state.qr })
+      return jsonOk({
+        phase: state.phase,
+        message: state.message,
+        qr: state.qr,
+        generation: state.generation,
+        uuid: state.uuid,
+      })
     }
     if (request.method === "POST" && request.path === "/phone") {
-      return bindPhoneRequest(deps, bind, request)
+      return bindPhoneRequest(deps, session, request)
     }
     if (request.method === "POST" && request.path === "/verify") {
-      return bindVerifyRequest(deps, bind, request, settle)
+      return bindVerifyRequest(deps, session, request, settle)
     }
     return notFound()
   })

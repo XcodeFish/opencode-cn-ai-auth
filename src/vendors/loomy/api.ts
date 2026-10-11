@@ -297,11 +297,27 @@ export async function fetchCatalog(fetcher: Fetcher, access: string): Promise<un
   }
 
   // The catalog moved to OpenAI's {object, data} shape, while business
-  // endpoints still use {code, desc, data}. Parse the envelope only when
-  // the catalog answer actually carries one.
+  // endpoints still use {code, desc, data}. Classify the HTTP result before
+  // accepting either success shape. A non-legacy 401 must never look like an
+  // empty catalog: the host needs the signed-out signal to request sign-in.
   const payload = result.json
   const root = asObject(payload)
   const legacy = root?.code !== undefined
+  if (!result.ok) {
+    const envelope = legacy ? parseEnvelope<unknown>(payload) : undefined
+    if (result.status === 401 || envelope?.code === LOOMY_SIGNED_OUT_CODE) {
+      throw new SignInExpiredError(
+        VENDOR,
+        `模型列表被拒绝：${envelope?.message ?? "登录态已失效，请重新登录"}`,
+      )
+    }
+    const message = envelope !== undefined && !envelope.ok ? envelope.message : `HTTP ${result.status}`
+    throw new VendorError(VENDOR, `模型列表读取失败：${message}`, {
+      ...(envelope?.code === undefined ? {} : { code: envelope.code }),
+      status: result.status,
+    })
+  }
+
   const envelope = legacy ? parseEnvelope<unknown>(payload) : { ok: true as const, data: payload }
 
   if (!envelope.ok) {

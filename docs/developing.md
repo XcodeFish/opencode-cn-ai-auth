@@ -80,7 +80,7 @@ m plugin login raccoon
 2. `bun run verify` 全绿，`git status` 确认没有夹带无关改动。
 3. 独立仓库发布：确认 `package.json` 没有 `private: true` 后执行 `npm publish`。
    发布包同时包含 Magpie 根入口与 `opencode/loomy`、`opencode/raccoon` 两个 OpenCode
-   子入口。
+   V2 子入口（各自导出 `{ id, setup }`）；V1 的函数/`server` loader 不在支持矩阵内。
 4. 进社区仓库（`magpie-community/plugins`）：
    - 目录 `packages/cn-ai/`，`package.json` 的 `name` 改为
      `@magpie-community/opencode-cn-ai-auth`；

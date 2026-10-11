@@ -40,9 +40,11 @@ magpie plugin options <name>          # 读回当前设置
 magpie plugin options <name> off      # 清空
 ```
 
-OpenCode 一侧也使用插件条目里的 `options` 对象，但不会保存 Magpie 的账号 metadata。
-设置后要重新登录/重载插件（凭据在插件加载时决定哪些登录方式存在）；Raccoon 直接
-接入 OpenCode 时，应把组织码放在 `officeIdentity` option 中。
+OpenCode V2 一侧使用插件条目里的 `options` 对象，token 可放在 `accessToken`（也可
+用 `LOOMY_SESSION` / `RACCOON_ACCESS_TOKEN` 环境变量），但不会保存 Magpie 的账号
+metadata。适配器在插件加载时注册回退模型、V2 integration 登录方式并将 token 注入
+请求；二维码/短信登录会在 OpenCode 的本地登录页完成，凭据由 OpenCode 保存。Raccoon
+直接接入 OpenCode 时，应把组织码放在 `officeIdentity` option 中。
 
 ## 2. Loomy（讯飞）
 

@@ -116,12 +116,15 @@ Magpie 加载一个插件目录时会取其中一个入口文件，并对该模�
   `vendorAuthPlugin`——厂商 id 要等 setup 运行才知道，与其取一个可能对不上的名字，不如让导出名
   做身份；两者不同时门禁会把两个名字都打印出来。
 
-`defineVendor` 是**唯一**接触宿主契约的地方，它把每个厂商定义映射成：
+`defineVendor` 是 Magpie 入口唯一接触宿主契约的地方，它把每个厂商定义映射成
+`config`、`auth` 和 `provider` 钩子；OpenCode 走下面这套独立适配边界。
 
-直接 OpenCode 使用 `opencode/loomy.ts` 或 `opencode/raccoon.ts`，每个子入口只暴露一个
-`default.server`。这是有意的宿主边界：OpenCode 的公共插件契约不消费 Magpie 的
-`usage`、`checkin`、`refresh` 和账号 metadata 扩展，不能把根入口的两个 Magpie 工厂
-误当成 OpenCode 的一个通用 server。
+直接 OpenCode 使用 `opencode/loomy.ts` 或 `opencode/raccoon.ts`，每个子入口只暴露
+OpenCode V2（V1 不在支持矩阵内）的 `default.{ id, setup }`。适配器通过 `ctx.provider.transform` 注册
+OpenAI-compatible provider 和回退模型，并通过 `http.request` 注入 token。OpenCode
+不会消费 Magpie 的 `usage`、`checkin` 和账号 metadata 扩展；Raccoon 的 refresh token
+只通过 V2 integration 的续期回调接入。根入口的 Magpie 工厂与两个 V2 子入口是两套
+独立宿主契约。
 
 ```
 config(config)        → config.provider[id] ??= { name, npm, api, models }

@@ -4,14 +4,15 @@
 Raccoon（商汤小浣熊），共享同一套协议实现。Magpie 使用一个包承载两个 provider，
 OpenCode 使用每家厂商一个显式入口：
 
-| provider id | 厂商 | 模型数（回退表） | 登录方式 |
+| provider id | 厂商 | 模型数（回退表） | Magpie 登录方式 |
 |---|---|---|---|
 | `loomy` | Loomy（讯飞） | 8 | 微信扫码 / 短信验证码 |
 | `raccoon` | Raccoon（商汤小浣熊） | 6 | 微信扫码 / 短信验证码 |
 
 包名 `opencode-cn-ai-auth`（本地开发 / 独立仓库）；将来贡献进 magpie-community
 时用 `@magpie-community/opencode-cn-ai-auth`，目录 `packages/cn-ai`。
-无运行时依赖、零构建：宿主 Bun 直接加载 TypeScript 源；`engines.bun >= 1.1.0`。
+无运行时依赖、零构建：宿主 Bun 直接加载 TypeScript 源；Magpie 需要
+`engines.bun >= 1.1.0`，OpenCode 子入口声明 `engines.opencode >= 2.0.0 < 3`。
 
 ## 安装
 
@@ -25,16 +26,30 @@ magpie plugin --json         # 看加载状态
 
 ### OpenCode
 
-OpenCode 的公共插件入口一次只加载一个 `server`。请按厂商选择子路径：
+OpenCode V2 按厂商加载一个子入口；每个子入口导出标准的 `{ id, setup }` 插件对象。
+这里的入口只支持 V2；V1 的函数/`server` loader 不会把它误当成 Magpie 插件：
 
-```json
-{ "plugin": ["opencode-cn-ai-auth/opencode/loomy"] }
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "opencode-cn-ai-auth/opencode/loomy",
+      "options": { "accessToken": "<loomy-session-token>" }
+    }
+  ]
+}
 ```
 
-Raccoon 使用 `opencode-cn-ai-auth/opencode/raccoon`，然后运行 `opencode auth login`。
-OpenCode 不提供 Magpie 的 `usage`、`checkin`、`refresh` 和账号 metadata 保存扩展；
-Raccoon 组织账号请在插件 options 中提供 `officeIdentity`。Magpie 的完整额度卡片、
-签到和自动续期能力只在 Magpie host 中生效。
+Raccoon 使用 `opencode-cn-ai-auth/opencode/raccoon`，并把 token 放进
+`RACCOON_ACCESS_TOKEN` 或插件 `options.accessToken`。也可以把两个条目同时放入
+`plugins`。适配器会注册回退模型目录、V2 integration 登录方式，并在请求中注入
+token；二维码/短信登录会在 OpenCode 的本地登录页完成，凭据由 OpenCode 保存，
+不会迁移 Magpie 的账号 metadata。Raccoon 组织账号请在插件 options 中提供
+`officeIdentity`。Magpie 的完整额度卡片和签到能力只在 Magpie host 中生效；Raccoon
+的自动续期只对返回 refresh token 的登录生效。
+
+兼容矩阵：OpenCode V2 的 `plugins` 配置和 `setup(ctx)` 入口；OpenCode V1 的
+`plugin` 配置及函数/`server` 入口不支持，需升级宿主或改用包根的 Magpie 入口。
 
 Magpie 仍然从包根入口 `index.ts` 加载两个插件工厂；根入口和两个 OpenCode 子入口
 都会随 npm 包发布。

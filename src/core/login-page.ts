@@ -7,9 +7,9 @@
  * keeps the two vendors' pages the same shape for the user, and keeps the
  * security rules in one place:
  *
- * - the page loads nothing from the network (no CDN fonts, no analytics),
- *   except where a vendor's own sign-in requires its script — Raccoon's
- *   captcha, which is loaded from Aliyun's CDN on that page alone;
+ * - the page loads nothing from the network (no CDN fonts, no analytics);
+ *   when a vendor's own sign-in requires a script, it is placed in an
+ *   opaque-origin sandbox iframe with a separate CSP;
  * - every value a vendor puts in the page goes through `escape` or is a
  *   constant of this package: no token, secret or phone number is ever
  *   written into the HTML (the tests assert this for each page);
@@ -18,7 +18,7 @@
  */
 
 import type { PageResponse } from "./local-page.ts"
-import { JSON_TYPE } from "./local-page.ts"
+import { HTML, JSON_TYPE } from "./local-page.ts"
 import { escapeHtml } from "./util.ts"
 
 export interface LoginPageSpec {
@@ -37,6 +37,22 @@ export interface LoginPageSpec {
   script: string
   /** Extra `<script src>` tags, in order; only for a vendor's own script. */
   scripts?: string[]
+}
+
+export interface SandboxedScriptFrameSpec {
+  /** The element id used to validate postMessage sources in the parent page. */
+  id: string
+  title: string
+  /** Relative path to the isolated document under the random login prefix. */
+  path: string
+}
+
+export interface SandboxedScriptPageSpec {
+  /** A public HTTPS script loaded only inside the opaque-origin frame. */
+  source: string
+  /** Trusted package-owned markup and bootstrap code for the frame. */
+  body: string
+  bootstrap: string
 }
 
 // 这段脚本里没有任何反斜杠转义，所以是普通模板串；若日后需要写 `\d` 一类的
@@ -121,6 +137,47 @@ function scriptTag(source: string): string {
     throw new Error("login page scripts must be public https URLs without credentials")
   }
   return `<script src="${escapeHtml(url.href)}"></script>`
+}
+
+/**
+ * Put a vendor browser SDK in an opaque-origin sandbox. It uses a separate
+ * document because an inline srcdoc would inherit the parent CSP; the parent
+ * validates messages against this exact frame window.
+ */
+export function renderSandboxedScriptFrame(spec: SandboxedScriptFrameSpec): string {
+  if (!/^[a-z][a-z0-9-]*$/.test(spec.path)) throw new Error("sandboxed frame path must be a relative name")
+  return `<iframe id="${escapeHtml(spec.id)}" title="${escapeHtml(spec.title)}" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" style="display:block;width:100%;height:380px;border:0" src="${spec.path}"></iframe>`
+}
+
+/** The child has its own CSP, including sandboxing even if opened directly. */
+export function renderSandboxedScriptPage(spec: SandboxedScriptPageSpec): PageResponse {
+  const url = new URL(spec.source)
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new Error("sandboxed login scripts must be public https URLs without credentials")
+  }
+  const body = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>body{margin:0;font:13px sans-serif;color:#4e5969}button{width:100%;padding:9px;border:0;border-radius:8px;background:#eef0f3;color:#4e5969;cursor:pointer}</style>
+</head>
+<body>
+${spec.body}
+<script src="${escapeHtml(url.href)}"></script>
+<script>
+"use strict";
+${spec.bootstrap}
+</script>
+</body>
+</html>`
+  return {
+    contentType: HTML,
+    contentSecurityPolicy:
+      "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; script-src 'unsafe-inline' https:; connect-src https: wss:; img-src data: https:; style-src 'unsafe-inline' https:",
+    body,
+  }
 }
 
 function accentStyle(accent: string | undefined): string {
