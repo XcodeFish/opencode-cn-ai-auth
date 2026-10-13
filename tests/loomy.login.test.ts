@@ -368,6 +368,57 @@ describe("微信扫码流程", () => {
     expect(fetcher.callsMatching("/points/first-login")).toHaveLength(0)
   })
 
+  test("同一 code 的重复确认帧不再二次花掉这个一次性 code", async () => {
+    // 微信的 code 只能用一次：确认那一帧的 code 一旦换到 rcode，后面再来的
+    // 405 只能是同一帧的重复，绝不能拿它再打一次 bind/auth（服务会回 270101）。
+    // 这个 fetcher 对同一 code 的第二次调用如实回答 270101。
+    const AUTH_PAGE = '<img class="js_qrcode_img" src="/connect/qrcode/QRUUID123456">'
+    const jpeg = () => new Response(jpegBytes())
+    const pollFrames = ["wx_errcode=405; wx_code='CODE-1';", "wx_errcode=405; wx_code='CODE-1';"]
+    let pollIndex = 0
+    const bindCodes: string[] = []
+    const fetcher = cannedFetch([
+      { match: "open.weixin.qq.com/connect/qrconnect", respond: textBody(AUTH_PAGE) },
+      { match: "open.weixin.qq.com/connect/qrcode/", respond: jpeg },
+      {
+        match: "long.open.weixin.qq.com/connect/l/qrconnect",
+        respond: async () => {
+          const frame = pollFrames[pollIndex++]
+          if (frame !== undefined) return textBody(frame)
+          await tick(5)
+          return textBody("wx_errcode=408;")
+        },
+      },
+      {
+        match: "/login/thirdAccount/bind/auth",
+        respond: (_url, init) => {
+          const code = JSON.parse(String(init?.body)).param.tcode.code as string
+          bindCodes.push(code)
+          const used = bindCodes.filter((item) => item === code).length
+          return used > 1
+            ? jsonOk({ code: "270101", desc: "第三方鉴权失败" })
+            : jsonOk({ code: "000000", desc: "", data: { rcode: "rcode-1", bind: 0 } })
+        },
+      },
+      {
+        match: "/login/thirdAccount/bind/skip",
+        respond: jsonOk({ code: "000000", data: { session: "sess-wechat", userid: "u-wx" } }),
+      },
+      { match: "/points/first-login", respond: jsonOk({ code: "000000", data: {} }) },
+    ])
+    const method = oauthMethod(
+      loginMethods({ client: fakeClient(), options: {}, fetcher, signInTimeoutMs: 800 }),
+      0,
+    )
+    const started = await method.authorize()
+    // 让流程跑到超时收尾：这两帧确认一定都被消费过了，若还有第二次提交，
+    // 它在 callback 落定前就已经发出。
+    const result = await started.callback()
+    expect(result.type).toBe("failed")
+    expect(bindCodes).toStrictEqual(["CODE-1"])
+    expect(fetcher.callsMatching("/login/thirdAccount/bind/auth")).toHaveLength(1)
+  }, 10_000)
+
   test("无用户 AccessKey 时，扫码与首次手机号绑定都能完成", async () => {
     await withEnvAsync({}, async () => {
       const fetcher = wechatFetcher(["wx_errcode=405; wx_code='CODE-1';"], false)

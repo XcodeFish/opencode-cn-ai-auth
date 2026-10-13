@@ -381,6 +381,12 @@ interface WechatSession {
   uuid: string
   /** The last status told to WeChat, which it long-polls incrementally by. */
   last: string
+  /**
+   * The scan already exchanged for an `rcode`. A WeChat `code` is
+   * single-use: the moment it has bought an `rcode`, no later frame may
+   * spend it again, or the service answers `270101`.
+   */
+  exchanged: boolean
   settled(): boolean
   settle(login: { access: string; userid: string; phone?: string }): void
   fail(message: string): void
@@ -390,10 +396,15 @@ interface WechatSession {
  * A confirmed scan: an account that is already bound is finished here, one
  * that is not moves the page to its binding step and keeps polling (the
  * binding itself happens through the page's two POSTs).
+ *
+ * A WeChat code is one-time: the exchange here is the only one this session
+ * ever makes for this scan, so a second confirmed frame can never replay it.
  */
 async function confirmedStep(session: WechatSession, code: string): Promise<"done" | "bind"> {
+  if (session.exchanged) return "bind"
   const keys = LOOMY_CLIENT_ACCESS_KEYS
   const bound = await bindWechat(session.deps.fetcher, keys, code)
+  session.exchanged = true
   session.bind.generation = session.state.generation
   session.bind.uuid = session.uuid
   session.bind.phone = ""
@@ -430,6 +441,8 @@ async function reissueQr(session: WechatSession): Promise<void> {
   session.bind.verifying = false
   delete session.bind.verifyPromise
   delete session.bind.lastVerifyResponse
+  // The old scan's code is gone with the old QR; the new one may be spent.
+  session.exchanged = false
   const next = await fetchWechatQr(session.deps.fetcher, randomId())
   if (session.settled() || session.state.generation !== generation) return
   session.uuid = next.uuid
@@ -532,6 +545,7 @@ async function startWechat(deps: LoomyLoginDeps): Promise<StartedFlow> {
     bind,
     uuid: first.uuid,
     last: "",
+    exchanged: false,
     settled: () => settlement.settled,
     settle,
     fail,

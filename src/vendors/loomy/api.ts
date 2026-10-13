@@ -37,6 +37,30 @@ import { signHeaders } from "./sign.ts"
 
 const VENDOR = "loomy"
 
+/**
+ * The third-party sign-in errors the service answers with a bare `desc`. The
+ * delivered sentence names a *step*, not a cause, so on its own it reads as
+ * "something failed" with nothing to do next — and the one code that stops
+ * most users (`270101`) is exactly the one the scanner cannot act on. These
+ * keep the vendor's code (the caller may branch on it) while saying what the
+ * person in front of the page can do.
+ *
+ * Verified live on 2026-10-13 with the shipped client credentials
+ * (`docs/vendors.md` §2): `bind/auth` → `270101`, `bind/sendMsg` → `270202`,
+ * `bind/checkCode` → `270301`, `bind/skip` → `270401`.
+ */
+const THIRD_PARTY_MESSAGES: Record<string, string> = {
+  "270101": "微信授权未通过（第三方鉴权失败）：请重新扫码；若反复失败，请改用短信验证码登录",
+  "270202": "授权已过期，请重新扫码",
+  "270301": "授权已过期，请重新扫码",
+  "270401": "授权已过期，请重新扫码",
+}
+
+/** The vendor's own sentence, or a readable one when the code is known. */
+function accountErrorText(code: string, message: string): string {
+  return THIRD_PARTY_MESSAGES[code] ?? message
+}
+
 export interface LoomyEnvelope<T> {
   ok: boolean
   code: string
@@ -123,7 +147,7 @@ async function postAccount(
   }
   const envelope = parseEnvelope(result.json)
   if (!envelope.ok) {
-    throw new VendorError(VENDOR, envelope.message, {
+    throw new VendorError(VENDOR, accountErrorText(envelope.code, envelope.message), {
       code: envelope.code,
       status: result.status,
     })

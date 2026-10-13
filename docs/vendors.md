@@ -71,6 +71,23 @@ metadata。适配器在插件加载时注册回退模型、V2 integration 登录
 扫码状态机、`appid`、回调地址来自 JetHub 的实现（redirect 用厂商白名单内的
 `https://loomy.xunfei.cn/oauth/wechat/callback`，本包只负责轮询，不需要接收回调）。
 
+**第三方登录的业务码。** 微信四步（`bind/auth` → `sendMsg` / `checkCode` /
+`skip`）失败时，服务回的是裸 `desc`：`bind/auth` `270101 第三方鉴权失败`、
+`bind/sendMsg` `270202`、`bind/checkCode` `270301`、`bind/skip` `270401`
+（后三个都是「第三方鉴权过期」）。2026-10-13 用随包客户端常量对线上服务实测所得
+（同一批实测：`sendMsgCode` 与带真实 session 的 `query/thirdInfo` 都回 `000000`，
+假密钥回 HTTP 401 `HMAC signature cannot be verified`——签名层本身是通的）。
+`270101` 只表示「这一枚微信 code 没能通过鉴权」，至于是被重复使用、已过期，
+还是厂商侧对 `wx18d60be432287cf8` 的配置变了，服务不区分。该码不再原样透出，
+`api.ts` 的 `THIRD_PARTY_MESSAGES` 把它翻成可照做的一句「重新扫码，不行就改用
+短信验证码登录」，其余码也各有说法，原始 `code` 仍由 `VendorError.code` 保留。
+
+**微信 code 一次性。** 一个微信 `code` 只能换一次 `rcode`。微信的长轮询可能对同一
+次授权重复给出 `405 + wx_code`，因此 `login.ts` 的 `confirmedStep` 在换到 `rcode`
+之后就把这次扫码标成「已兑换」（`WechatSession.exchanged`），后续确认帧不再重放——
+重放会让服务回 `270101`（上游 JetHub `loomy-wechat-login.js` 用
+`state.wechatCode` 锁存同一件事，本包移植时补上）。二维码换代时该标记随旧码一起清零。
+
 ### 会话与续期
 
 - **没有续期端点**：本包不实现 `auth.refresh`。业务端点上会话失效由
@@ -274,6 +291,11 @@ usage 窗口表达不了硬排除（只有**已知上限**的窗口才会参与�
    不在 loader 的 fetch 上补这个头；若日后真实流量证实某家用 403 表达会话失效，应
    按响应体特征词做有据的翻译，并补回归测试。社区里 `cline` / `minimax` 用的是
    「补 `kept` 或按文案分类」这类更保守的写法，可作参考。
+9. Loomy 的微信 `270101` 有一个**未证伪**的厂商侧可能：若讯飞对
+   `wx18d60be432287cf8` 这个网站应用改了主体、密钥或授权槽位，那么即使是刚拿到、
+   从未用过的合法 code 也会被判「第三方鉴权失败」。本包已消除**我们这侧**能把
+   同一枚 code 用第二次的那条路（见 §2「微信 code 一次性」），但「合法 code 是否
+   仍被接受」只有在真机上扫一次、把那一帧的 `wx_code` 重放给 `bind/auth` 才能定论。
 
 发现与上述不符的现象时：先改 `src/vendors/<id>/product.ts` 的常量与本文档，
 再补一条回归测试；不要只改实现不留证据。

@@ -8,6 +8,10 @@
 import { describe, expect, test } from "bun:test"
 import { SignInExpiredError, VendorError } from "../src/core/errors.ts"
 import {
+  bindCheckCode,
+  bindSendMsg,
+  bindSkip,
+  bindWechat,
   claimDailyQuota,
   extractUuid,
   fetchCatalog,
@@ -378,5 +382,64 @@ describe("签名接口", () => {
       msgid: "msg-1",
       expire: 1_209_600,
     })
+  })
+})
+
+describe("第三方登录的错误码", () => {
+  // 账号服务用裸 desc 回答第三方登录失败，句子只说“哪一步失败”不说“怎么办”。
+  // 这里把这四个码钉住：句子要可行动，code 要原样保留给上层分叉。
+  const cases: {
+    label: string
+    code: string
+    desc: string
+    call: (fetcher: ReturnType<typeof cannedFetch>) => Promise<unknown>
+  }[] = [
+    {
+      label: "bind/auth 270101",
+      code: "270101",
+      desc: "第三方鉴权失败",
+      call: (fetcher) => bindWechat(fetcher, KEYS, "CODE-1"),
+    },
+    {
+      label: "bind/sendMsg 270202",
+      code: "270202",
+      desc: "第三方鉴权过期",
+      call: (fetcher) => bindSendMsg(fetcher, KEYS, { rcode: "rcode-1", phone: "13812345678" }),
+    },
+    {
+      label: "bind/checkCode 270301",
+      code: "270301",
+      desc: "第三方鉴权过期",
+      call: (fetcher) => bindCheckCode(fetcher, KEYS, { rcode: "rcode-1", code: "123456", msgid: "msg-1" }),
+    },
+    {
+      label: "bind/skip 270401",
+      code: "270401",
+      desc: "第三方鉴权过期",
+      call: (fetcher) => bindSkip(fetcher, KEYS, "rcode-1"),
+    },
+  ]
+
+  for (const item of cases) {
+    test(`${item.label} 翻成可行动的中文，并保留 code`, async () => {
+      const fetcher = cannedFetch([
+        { match: "account.xfinfr.com", respond: jsonOk({ code: item.code, desc: item.desc }) },
+      ])
+      const error = await rejectionError(() => item.call(fetcher))
+      expect(error).toBeInstanceOf(VendorError)
+      expect((error as VendorError).code).toBe(item.code)
+      // 裸 desc 不再是最终文案；换成了能照做的一句，且仍以厂商前缀出现。
+      expect(error.message).not.toBe(`loomy: ${item.desc}`)
+      expect(error.message).toMatch(/^loomy: /)
+      expect(error.message).toMatch(/重新扫码|短信验证码登录/)
+    })
+  }
+
+  test("未收录的码原样透出厂商 desc", async () => {
+    const fetcher = cannedFetch([
+      { match: "account.xfinfr.com", respond: jsonOk({ code: "010003", desc: "请求参数错误" }) },
+    ])
+    const error = await rejectionError(() => bindWechat(fetcher, KEYS, "CODE-1"))
+    expect(error.message).toBe("loomy: 请求参数错误")
   })
 })
