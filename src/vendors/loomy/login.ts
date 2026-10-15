@@ -47,6 +47,7 @@ import {
   LOOMY_ACCESS_KEY_SECRET,
   LOOMY_ID,
   LOOMY_SESSION_TTL_SECONDS,
+  LOOMY_SIGN_IN_QUOTA_DEADLINE_MS,
   LOOMY_SIGN_IN_TIMEOUT_MS,
   LOOMY_SMS_LOGIN_OPTION,
   LOOMY_SMS_SEND_COOLDOWN_MS,
@@ -60,6 +61,8 @@ export interface LoomyLoginDeps {
   signInTimeoutMs?: number
   /** The clock the SMS cooldown reads; tests pin it, the host leaves it out. */
   now?: () => number
+  /** How long a sign-in waits for the day's quota; tests shorten it. */
+  quotaDeadlineMs?: number
 }
 
 /**
@@ -109,6 +112,7 @@ function smsKeys(options: Record<string, unknown>): LoomyAccountKeys {
 export function signInResult(
   login: { access: string; userid: string; phone?: string },
   now = Date.now(),
+  quota?: { dailyQuota?: number; dailyCycleDate?: string },
 ): SignInResult {
   const label = login.phone === undefined ? login.userid : maskPhone(login.phone)
   return {
@@ -119,6 +123,15 @@ export function signInResult(
     accountId: label,
     userid: login.userid,
     ...(login.phone === undefined ? {} : { phone: login.phone }),
+    // The day's quota rides along with the sign-in so the account starts out
+    // knowing it. It cannot be written afterwards: this result is what the
+    // host stores, and the `usage` read that would otherwise fill it in has
+    // no way to learn it — `points/records` does not state `dailyQuota`
+    // (probed 2026-10-15; only the check-in answer does). Without this the
+    // daily window stays `aside` ("今日剩余 0", no percentage, not routed by)
+    // until the user happens to press a check-in.
+    ...(quota?.dailyQuota === undefined ? {} : { dailyQuota: quota.dailyQuota }),
+    ...(quota?.dailyCycleDate === undefined ? {} : { dailyCycleDate: quota.dailyCycleDate }),
   }
 }
 
@@ -127,26 +140,62 @@ export function signInResult(
  * a sign-in — and it does so after **both** of them (the renderer bundle calls
  * `points/first-login` on the SMS path and on the WeChat path alike), so both
  * sign-in methods here call this. It is idempotent, and it is what makes the
- * day's `dailyQuota` known. The answer is not kept here: this runs before the
- * host has stored the sign-in, and remembering a quota means writing the whole
- * account back (see `session.ts`). The day's first `usage` read does it instead
- * — `points/records` carries the quota once a check-in has happened — and the
- * check-in hook keeps it from then on.
+ * day's `dailyQuota` known.
  *
- * Best effort: a sign-in that worked is not undone because this failed.
+ * Its answer is returned to be stored **with the sign-in** (`signInResult`),
+ * not written back afterwards: this runs before the host has stored the
+ * account, so `client.auth.set` has nothing to write to yet. The `usage` read
+ * cannot make it up either — `points/records` does not state `dailyQuota`
+ * (probed 2026-10-15), so a new account would show no percentage until its
+ * first check-in. Hence the quota travels inside the sign-in result.
+ *
+ * Best effort: a sign-in that worked is not undone because this failed, and
+ * it is not held up for long either — the caller's `raceQuota` gives up on
+ * `LOOMY_SIGN_IN_QUOTA_DEADLINE_MS` and lands the sign-in without a quota.
  */
 async function initializeQuota(input: {
   client: PluginClient
   fetcher: Fetcher
   access: string
-}): Promise<void> {
+}): Promise<{ dailyQuota?: number; dailyCycleDate?: string }> {
   const log = vendorLogger(input.client, LOOMY_ID)
   try {
     const grant = await claimDailyQuota(input.fetcher, input.access)
-    if (grant.ok) return
+    if (grant.ok) {
+      return {
+        ...(grant.data.dailyQuota === undefined ? {} : { dailyQuota: grant.data.dailyQuota }),
+        ...(grant.data.dailyCycleDate === undefined ? {} : { dailyCycleDate: grant.data.dailyCycleDate }),
+      }
+    }
     await log.warn(`登录后初始化每日额度失败：${grant.message}`)
   } catch (error) {
     await log.warn(`登录后初始化每日额度失败：${errorMessage(error)}`)
+  }
+  return {}
+}
+
+/**
+ * The day's quota, or nothing when it takes too long.
+ *
+ * `initializeQuota` is a network call that has to finish before the sign-in
+ * result is handed over (the quota is stored inside it), so it needs a
+ * ceiling of its own: a vendor that answers slowly would otherwise hold the
+ * whole sign-in open. Losing the race costs the daily window its percentage
+ * until the first check-in — the sign-in itself is unaffected.
+ */
+async function raceQuota(
+  input: Parameters<typeof initializeQuota>[0],
+  deadlineMs: number,
+): Promise<{ dailyQuota?: number; dailyCycleDate?: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<{ dailyQuota?: number; dailyCycleDate?: string }>((resolve) => {
+    timer = setTimeout(() => resolve({}), deadlineMs)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([initializeQuota(input), expired])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
@@ -311,7 +360,7 @@ async function bindVerifyRequest(
   deps: LoomyLoginDeps,
   session: WechatSession,
   request: PageRequest,
-  complete: (login: { access: string; userid: string; phone?: string }) => void,
+  complete: (login: { access: string; userid: string; phone?: string }) => Promise<void>,
 ): Promise<PageResponse> {
   const bind = session.bind
   const body = await request.json()
@@ -335,7 +384,9 @@ async function bindVerifyRequest(
       if (stale !== undefined) {
         response = stale
       } else {
-        complete(login)
+        // Awaited: the sign-in result (with its quota) must be in hand before
+        // the page is told it succeeded, or the user closes it mid-write.
+        await complete(login)
         response = jsonOk()
       }
     } catch (error) {
@@ -413,7 +464,7 @@ interface WechatSession {
    */
   exchanged: boolean
   settled(): boolean
-  settle(login: { access: string; userid: string; phone?: string }): void
+  settle(login: { access: string; userid: string; phone?: string }): Promise<void>
   fail(message: string): void
 }
 
@@ -441,7 +492,7 @@ async function confirmedStep(session: WechatSession, code: string): Promise<"don
   delete session.bind.lastVerifyResponse
   session.bind.rcode = bound.rcode
   if (bound.bound) {
-    session.settle(await bindSkip(session.deps.fetcher, keys, bound.rcode))
+    await session.settle(await bindSkip(session.deps.fetcher, keys, bound.rcode))
     return "done"
   }
   session.state.phase = "bind"
@@ -547,12 +598,15 @@ async function startWechat(deps: LoomyLoginDeps): Promise<StartedFlow> {
     timer.unref?.()
   }
 
-  const settle = (login: { access: string; userid: string; phone?: string }): void => {
+  const settle = async (login: { access: string; userid: string; phone?: string }): Promise<void> => {
     if (settlement.settled) return
     state.phase = "done"
     state.message = PHASE_TEXT.done
-    void initializeQuota({ client: deps.client, fetcher, access: login.access })
-    settlement.settle(signInResult(login))
+    const quota = await raceQuota(
+      { client: deps.client, fetcher, access: login.access },
+      deps.quotaDeadlineMs ?? LOOMY_SIGN_IN_QUOTA_DEADLINE_MS,
+    )
+    settlement.settle(signInResult(login, Date.now(), quota))
     close()
   }
 
@@ -797,8 +851,14 @@ async function handleSmsVerify(
       code,
       msgid: state.msgid,
     })
-    settlement.settle(signInResult(login))
-    void initializeQuota({ client: deps.client, fetcher: deps.fetcher, access: login.access })
+    // Bounded wait, then the sign-in lands with whatever it learned: the
+    // quota travels inside the result (see `signInResult`), so it has to be
+    // resolved before the page is told it is done.
+    const quota = await raceQuota(
+      { client: deps.client, fetcher: deps.fetcher, access: login.access },
+      deps.quotaDeadlineMs ?? LOOMY_SIGN_IN_QUOTA_DEADLINE_MS,
+    )
+    settlement.settle(signInResult(login, Date.now(), quota))
     close()
     return jsonOk()
   } catch (error) {

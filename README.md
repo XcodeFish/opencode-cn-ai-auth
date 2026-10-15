@@ -105,13 +105,15 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
 | --- | --- | --- |
 | 模型目录 | 账号级 `GET /models`，倍率写在展示名里，插件把它解析成 `rate` 徽标；读不到时回退内置 8 个模型并标记为回退 | 账号级 `GET /model_catalog`，取 `type === "chat"` 且非 `visible: false`；倍率来自 `billing_multiplier` / `billing_effective_multiplier`，回退内置 6 个模型 |
 | 思考档位 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） |
-| 用量卡片 | 两池：今日积分（参与选号）+ 永久积分（`aside`，只展示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） |
+| 用量卡片 | 三行：今日积分（参与选号）+ 永久积分（`aside`）+ 新手任务进度（`aside`，8/8 领完时不显示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） |
 | 锁定永久积分 | `options.lockPermanent: true` 时，今日额度用完即拒绝请求（429，宿主把账号 bench 到窗口重置），不再悄悄花永久积分 | — |
 | 每日签到 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 |
 - **新手任务（Loomy）**：宿主没有一次性奖励钩子，本包把它挂在唯一的写钩子 `auth.checkin`
   上——点额度卡片的 `Check in now`、跑 `magpie accounts checkin`、或在 Settings ›
   Daily check-in › Plugins 打开自动签到，都会顺手把没领的任务领掉。任务分不计入
-  `credit`（那是「今日额度」），只写在签到结果的消息里。详见 [`docs/vendors.md`](docs/vendors.md) §2。
+  `credit`（那是「今日额度」）。由于宿主的 CLI 与卡片只在签到**失败**时显示插件返回的
+  消息，进度另在用量卡片上占一行（`新手任务 2/8 · 已领 1500 / 还有 8500 分可领`，
+  `aside`、8/8 领完不显示）。详见 [`docs/vendors.md`](docs/vendors.md) §2。
 | 续期 | 没有 refresh 端点：会话 14 天，按本地时间记 `expires`，到期需重新登录 | 有：`POST /refresh` 轮换 `access_token`（`refresh_token` 缺省时保留旧值），提前 5 分钟刷新 |
 | 图片输入 | 按 `/models` 的输入模态 | 按目录 `tags` + 两个实测能读图但未标 vision 的模型白名单 |
 

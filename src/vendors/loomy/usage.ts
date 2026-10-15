@@ -149,13 +149,16 @@ export function windowsOf(points: LoomyPoints, now: number): UsageWindow[] {
   return windows
 }
 
-export function usageReport(points: LoomyPoints, options: { user?: string; now?: number } = {}): UsageReport {
+export function usageReport(
+  points: LoomyPoints,
+  options: { user?: string; now?: number; extraWindows?: UsageWindow[] } = {},
+): UsageReport {
   const now = options.now ?? Date.now()
   const total = points.available ?? (points.permanent ?? 0) + (points.daily ?? 0)
   return {
     balance: `${total} 积分`,
     ...(options.user === undefined ? {} : { user: options.user }),
-    windows: windowsOf(points, now),
+    windows: [...windowsOf(points, now), ...(options.extraWindows ?? [])],
   }
 }
 

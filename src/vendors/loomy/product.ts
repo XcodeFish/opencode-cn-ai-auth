@@ -112,6 +112,18 @@ export const LOOMY_WECHAT_POLL_TIMEOUT_MS = 40_000
 /** How long a sign-in may take before the plugin gives up on it. */
 export const LOOMY_SIGN_IN_TIMEOUT_MS = 10 * 60 * 1000
 
+/**
+ * How long a sign-in waits for the day's quota before landing without it.
+ *
+ * The quota rides inside the sign-in result (see `signInResult`), so the wait
+ * is on the critical path of signing in: the request itself took ~450ms when
+ * probed on 2026-10-15, and 8s is roomy for a slow connection while still
+ * short enough that a sick endpoint cannot make the sign-in look hung. Timing
+ * out costs the percentage on the daily window until the first check-in, not
+ * the sign-in.
+ */
+export const LOOMY_SIGN_IN_QUOTA_DEADLINE_MS = 8_000
+
 /** A browser user agent: WeChat's pages are unfriendly to anything else. */
 export const LOOMY_WECHAT_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +

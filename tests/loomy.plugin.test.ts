@@ -11,6 +11,7 @@ import { SignInExpiredError } from "../src/core/errors.ts"
 import type { ConfigProvider, Hooks, ProviderInfo } from "../src/core/types.ts"
 import { forgetDailyBalances, rememberDailyBalance } from "../src/vendors/loomy/balance.ts"
 import { LoomyAuthPlugin } from "../src/vendors/loomy/index.ts"
+import { forgetTaskReadings } from "../src/vendors/loomy/tasks.ts"
 import { cannedFetch, fakeClient, jsonFail, jsonOk, providerOf, rejectionError } from "./helpers.ts"
 
 const PROVIDER: ProviderInfo = { id: "loomy", models: {} }
@@ -117,6 +118,104 @@ describe("没有账号的入口", () => {
     } finally {
       globalThis.fetch = original
     }
+  })
+})
+
+describe("usage 的接线", () => {
+  async function withFetch<T>(fetcher: ReturnType<typeof cannedFetch>, run: () => Promise<T>): Promise<T> {
+    const original = globalThis.fetch
+    globalThis.fetch = fetcher
+    try {
+      return await run()
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+
+  test("还有没领的新手任务时，额度卡片多一行 aside 的进度", async () => {
+    forgetTaskReadings()
+    const fetcher = cannedFetch([
+      {
+        match: "/points/records",
+        respond: jsonOk({
+          code: "000000",
+          data: { balance: 500, dailyBalance: 4000, availableBalance: 4500 },
+        }),
+      },
+      {
+        match: "/onboarding/tasks",
+        respond: jsonOk({
+          code: "000000",
+          data: { tasks: { first_message: true, pick_skill: true }, earned: 0, total: 10_000 },
+        }),
+      },
+    ])
+    const hooks = await loomyHooks()
+    const usage = hooks.auth.usage
+    if (usage === undefined) throw new Error("loomy 必须有 usage 钩子")
+    const report = await withFetch(fetcher, () =>
+      usage(async () => ({ ...AUTH, dailyQuota: 5000, dailyCycleDate: "2026-10-15" }), PROVIDER),
+    )
+    const tasks = report.windows?.find((window) => window.name === "新手任务")
+    expect(tasks?.aside).toBe(true)
+    // first_message 500 + pick_skill 1000 = 1500 已领。
+    expect(tasks?.display).toBe("新手任务 2/8 · 已领 1500 / 还有 8500 分可领")
+    // 插在钞池之后：今日 + 永久 + 新手任务。
+    expect(report.windows?.map((window) => window.name)).toStrictEqual(["今日积分", "永久积分", "新手任务"])
+  })
+
+  test("任务都领完时卡片上不多这一行", async () => {
+    forgetTaskReadings()
+    const all = Object.fromEntries(
+      [
+        "first_message",
+        "pick_skill",
+        "generate_ppt",
+        "set_schedule",
+        "install_skill",
+        "configure_remote",
+        "create_soul",
+        "share_soul",
+      ].map((key) => [key, true]),
+    )
+    const fetcher = cannedFetch([
+      {
+        match: "/points/records",
+        respond: jsonOk({
+          code: "000000",
+          data: { balance: 500, dailyBalance: 4000, availableBalance: 4500 },
+        }),
+      },
+      {
+        match: "/onboarding/tasks",
+        respond: jsonOk({ code: "000000", data: { tasks: all, earned: 10_000, total: 10_000 } }),
+      },
+    ])
+    const hooks = await loomyHooks()
+    const usage = hooks.auth.usage
+    if (usage === undefined) throw new Error("loomy 必须有 usage 钩子")
+    const report = await withFetch(fetcher, () => usage(async () => AUTH, PROVIDER))
+    expect(report.windows?.map((window) => window.name)).not.toContain("新手任务")
+  })
+
+  test("任务表读不到时额度照常返回，只是少一行", async () => {
+    forgetTaskReadings()
+    const fetcher = cannedFetch([
+      {
+        match: "/points/records",
+        respond: jsonOk({
+          code: "000000",
+          data: { balance: 500, dailyBalance: 4000, availableBalance: 4500 },
+        }),
+      },
+      { match: "/onboarding/tasks", respond: jsonFail({ code: "500", desc: "boom" }) },
+    ])
+    const hooks = await loomyHooks()
+    const usage = hooks.auth.usage
+    if (usage === undefined) throw new Error("loomy 必须有 usage 钩子")
+    const report = await withFetch(fetcher, () => usage(async () => AUTH, PROVIDER))
+    expect(report.balance).toBe("4500 积分")
+    expect(report.windows?.map((window) => window.name)).toStrictEqual(["今日积分", "永久积分"])
   })
 })
 

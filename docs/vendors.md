@@ -134,20 +134,31 @@ metadata。适配器在插件加载时注册回退模型、V2 integration 登录
 
 | 窗口 | 来源 | 宿主语义 |
 |---|---|---|
-| 今日积分 | `dailyQuota − dailyConsumed`（`/points/records` 读，签到应答给 `dailyQuota`） | 唯一参与路由的窗口：`used = consumed/quota`，重置时间取服务端 `dailyCycleDate`，缺失时用北京时间次日 00:05 |
+| 今日积分 | `dailyQuota − dailyConsumed`（`/points/records` 只给两个余额，`dailyQuota` 只有 `POST /points/first-login` 给） | 唯一参与路由的窗口：`used = consumed/quota`，重置时间取服务端 `dailyCycleDate`，缺失时用北京时间次日 00:05 |
 | 永久积分 | 同上 | `aside: true`：只展示，不参与路由 |
+| 新手任务 | `GET /onboarding/tasks` 的 8 个标记 | `aside: true`：只展示，不参与路由；8/8 领完时不显示这一行 |
 
-- `dailyQuota` 只有 `POST /points/first-login` 会说；签到后按账号持久化
-  （`rememberQuota`），下次 usage 读回它（`quotaForNow`，`tests/loomy.usage.test.ts`
-  盯着这条接线）。拿不到配额时，今日窗口退化为 `aside: true` 的"剩余 N"。
-  持久化下来的配额带 `dailyCycleDate`：属于**已经重置的那一天**的配额不再继承
-  （额度可能随活动变化，JetHub 对同字段的告诫同样是"不要硬编码"），今日窗口
-  就等当天签到再说。
+**`dailyQuota` 只有 `POST /points/first-login` 会说**（2026-10-15 实测：
+`/points/records` 只回 `balance` / `dailyBalance` / `availableBalance`，**没有**
+`dailyQuota` / `dailyConsumed` / `dailyCycleDate`——遍历 `recordType` 与 `pageSize`
+都一样）。它进账号记录有两条路：
+
+1. **登录时随登录结果一起存**（主力路径）：`POST /points/first-login` 的答案塞进
+   `SignInResult`（`login.ts` 的 `signInResult`），宿主 `save()` 把 `refresh`/`access`/
+   `expires` 之外的字段原样留在顶层。新登录的账号因此**第一眼就有百分比**。
+   这次调用被 `raceQuota` 套了 8s 上限（`LOOMY_SIGN_IN_QUOTA_DEADLINE_MS`），
+   拿不到就照常登录、只是不带 quota（今日窗口退回 `aside`），不阻断登录。
+2. **签到后补写**（老账号与失败重试）：`rememberQuota` 写回账号，`quotaForNow`
+   在下次 usage 读回它（`tests/loomy.usage.test.ts` 盯着这条接线）。
+
+持久化下来的配额带 `dailyCycleDate`：属于**已经重置的那一天**的配额不再继承
+（额度可能随活动变化，JetHub 对同字段的告诫同样是"不要硬编码"），今日窗口
+就等当天签到再说。
 - `POST /points/first-login` 幂等：`alreadyProcessed: true` → `done`，否则
   `claimed`；签到失败返回 `failed` + 厂商消息。
 - **登录后初始化**：官方客户端在**两条**登录路径（短信与微信）成功后都会调
-  `POST /points/first-login`，本包照做（失败只 warn，不影响登录）。它顺带让
-  `dailyQuota` 与当日余额进入账号记录，今日窗口因此能立刻参与选号。
+  `POST /points/first-login`，本包照做（失败只 warn，不影响登录），并把答案里的
+  `dailyQuota` / `dailyCycleDate` 交给宿主随登录态存下——这就是上面第 1 条。
 
 ### 锁定永久积分（`options.lockPermanent`）
 
@@ -198,6 +209,20 @@ checkin`、Settings › Daily check-in › Plugins 的自动开关，三者都�
 - **任务分不进 `credit`**：`credit` 会被读成「今日发放」，把 10000 永久积分报在那儿
   等于谎报每日额度。任务情况只写 `message`，`credit` 仍只算当日额度。
 - **`100002` 仍抛 `SignInExpiredError`**，让宿主标记账号需重新登录（和签到同一条规则）。
+
+**在卡片上看得见（`tasks.ts`）。** 签到返回的 `message` 宿主只在**失败**时显示：
+`usageOf` / CLI 的签到输出对 `claimed` / `done` 只拼 `credit` 与 `streak`，不拼
+`msg`（读自 magpie 0.1.1254 的 `plugin-host` 与界面字符串）。所以「一键领取」本身
+是看得见结果的，但只领到部分、或某次被拒，用户都无从知道。于是 `usage` 里另起一行
+读 `GET /onboarding/tasks`（只读），按账号缓存 10 分钟（`LOOMY_TASKS_TTL_MS`，
+usage 每次刷新都会走到这里），还有没领的就多一个 `aside: true` 的窗口：
+
+```
+新手任务 2/8 · 已领 1500 / 还有 8500 分可领
+```
+
+不带 `limit` / `amount`（否则卡片会画成"池子被花掉多少"的进度条），8/8 领完时
+这一行不出现。读失败只是一个 `undefined`，不影响额度卡片本身。
 
 ### 已知限制
 

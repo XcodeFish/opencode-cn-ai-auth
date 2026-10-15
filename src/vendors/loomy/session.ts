@@ -42,8 +42,14 @@ export function accountLabel(auth: StoredAuth | undefined): string | undefined {
  *
  * Written only when it changed: the host bumps the account and reloads its
  * sign-in whenever this store changes, and a no-op write would do that on
- * every usage read. `points/records` carries the quota too once a check-in
- * has happened, so a read can be the thing that fills it in.
+ * every usage read.
+ *
+ * This is the **second** way the quota reaches the account: a fresh sign-in
+ * carries it inside its result (`login.ts`'s `signInResult`), which is the
+ * path that makes a newly signed-in account show a percentage straight away.
+ * This one covers everything else — an account signed in before that field
+ * existed, or one whose sign-in-time read timed out. `points/records` cannot
+ * fill it in on its own: it does not state `dailyQuota` (probed 2026-10-15).
  */
 export async function rememberQuota(
   client: PluginClient,

@@ -149,7 +149,12 @@ describe("短信方法的 authorize / callback", () => {
           claimStarted?.()
           return jsonOk({
             code: "000000",
-            data: { alreadyProcessed: false, dailyQuota: 5000, dailyConsumed: 0 },
+            data: {
+              alreadyProcessed: false,
+              dailyQuota: 5000,
+              dailyConsumed: 0,
+              dailyCycleDate: "2026-10-15",
+            },
           })
         },
       },
@@ -200,6 +205,10 @@ describe("短信方法的 authorize / callback", () => {
     expect(result.userid).toBe("u-1")
     expect(result.phone).toBe("13812345678")
     expect(result.accountId).toBe("138****5678")
+    // 登录时拿到的当日配额随登录结果一起交给宿主：新账号的今日窗口因此
+    // 立刻有百分比，不用等用户手动签到（`points/records` 不给 dailyQuota）。
+    expect(result.dailyQuota).toBe(5000)
+    expect(result.dailyCycleDate).toBe("2026-10-15")
     expect(result.expires).toBeGreaterThanOrEqual(before + LOOMY_SESSION_TTL_SECONDS * 1000)
     expect(result.expires).toBeLessThanOrEqual(Date.now() + LOOMY_SESSION_TTL_SECONDS * 1000)
 
@@ -278,6 +287,80 @@ describe("短信方法的 authorize / callback", () => {
     await started.callback()
     expect(fetcher.calls).toHaveLength(0)
   })
+
+  test("登录额度拿不到时照常登录，只是不带 quota（不阻断登录）", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/login/phone/sendMsgCode",
+        respond: jsonOk({ code: "000000", desc: "", data: { msgid: "msg-1" } }),
+      },
+      {
+        match: "/login/phone/checkCode",
+        respond: jsonOk({
+          code: "000000",
+          desc: "",
+          data: { session: "sess-2", userid: "u-2", phone: "13812345678" },
+        }),
+      },
+      { match: "/points/first-login", respond: jsonOk({ code: "520001", desc: "额度服务抖动" }) },
+    ])
+    const method = oauthMethod(
+      loginMethods({ client: fakeClient(), options: KEYS, fetcher, signInTimeoutMs: 50 }),
+      1,
+    )
+    const started = await method.authorize()
+    await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    const verified = await postPage(started.url ?? "", "verify", { code: "123456" })
+    expect(JSON.parse(await verified.text())).toStrictEqual({ ok: true })
+    const result = await started.callback()
+    if (result.type !== "success") throw new Error(`额度失败不该挡住登录，实际 ${JSON.stringify(result)}`)
+    expect(result.access).toBe("sess-2")
+    // quota 没拿到就不写字段，窗口退回「上限未知」而不是写个假的。
+    expect("dailyQuota" in result).toBe(false)
+    expect("dailyCycleDate" in result).toBe(false)
+  })
+
+  test("额度接口挂住时按超时上限放行，登录不会被拖住", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/login/phone/sendMsgCode",
+        respond: jsonOk({ code: "000000", desc: "", data: { msgid: "msg-1" } }),
+      },
+      {
+        match: "/login/phone/checkCode",
+        respond: jsonOk({
+          code: "000000",
+          desc: "",
+          data: { session: "sess-3", userid: "u-3", phone: "13812345678" },
+        }),
+      },
+      {
+        match: "/points/first-login",
+        // 永不 resolve：模拟接口挂住，验证 raceQuota 会兜底。
+        respond: () => new Promise<never>(() => {}),
+      },
+    ])
+    const method = oauthMethod(
+      loginMethods({
+        client: fakeClient(),
+        options: KEYS,
+        fetcher,
+        signInTimeoutMs: 60_000,
+        // 上限调小，测试不必真等 8 秒。
+        quotaDeadlineMs: 300,
+      }),
+      1,
+    )
+    const started = await method.authorize()
+    await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    const began = Date.now()
+    await postPage(started.url ?? "", "verify", { code: "123456" })
+    const result = await started.callback()
+    const waited = Date.now() - began
+    if (result.type !== "success") throw new Error(`应当登录成功，实际 ${JSON.stringify(result)}`)
+    expect("dailyQuota" in result).toBe(false)
+    expect(waited).toBeLessThan(5_000)
+  }, 30_000)
 
   test("同一号码两次发送之间隔 60 秒，且响应带 retryAfterMs", async () => {
     let clock = 1_700_000_000_000

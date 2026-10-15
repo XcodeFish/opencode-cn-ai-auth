@@ -21,6 +21,7 @@ import { loginMethods } from "./login.ts"
 import { fallbackModels, modelsFrom } from "./models.ts"
 import { LOOMY_API_BASE, LOOMY_ICON, LOOMY_ID, LOOMY_NAME, LOOMY_SIGNED_OUT_CODE } from "./product.ts"
 import { accountLabel, rememberedQuota, rememberQuota, requireSession, sessionOf } from "./session.ts"
+import { taskStateFor, tasksWindow } from "./tasks.ts"
 import { checkinResult, quotaForNow, usageReport } from "./usage.ts"
 
 /** Where this vendor's models are reached; see `core/plugin.ts`. */
@@ -85,11 +86,12 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
         if (points.code === LOOMY_SIGNED_OUT_CODE) return { signIn: "expired", error: points.message }
         return { error: points.message }
       }
-      // `points/records` does not state the day's ceiling: only the check-in
-      // answer does. The quota the account kept at its last check-in is what
-      // lets this reading draw the share-used window the host routes by, and
-      // a quota from an earlier day is dropped rather than carried over
-      // (`usage.ts`'s `quotaForNow`).
+      // `points/records` does not state the day's ceiling (probed 2026-10-15:
+      // it answers only the two balances). So the quota comes from the account
+      // itself — stored with the sign-in when it was learned, or written back
+      // by a check-in — and `quotaForNow` is what turns it into the
+      // share-used window the host routes by. A quota from an earlier day is
+      // dropped rather than carried over.
       const today = quotaForNow(points.data, rememberedQuota(auth), Date.now())
       // This is the reading the locked-permanent gate refuses on
       // (`balance.ts`): it means the day is spent even when the permanent
@@ -98,8 +100,14 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
       // `points/records` states the day's quota once a check-in has happened:
       // keep it, so the daily pool can be a window the host routes by.
       await rememberQuota(client, context.provider.id, auth, today.dailyQuota, today.dailyCycleDate)
+      // The new-user tasks are shown beside the pools: their claim rides on
+      // `auth.checkin`, whose message the host only prints on failure, so the
+      // card would otherwise never say where they stand (`tasks.ts`). A read
+      // that fails just leaves the line out.
+      const tasks = tasksWindow((await taskStateFor(fetch, auth, access))?.data)
       return usageReport(today, {
         ...(accountLabel(auth) === undefined ? {} : { user: accountLabel(auth) as string }),
+        ...(tasks === undefined ? {} : { extraWindows: [tasks] }),
       })
     },
 
