@@ -39,17 +39,35 @@ export function notFound(): PageResponse {
 
 const MAX_BODY_BYTES = 64 * 1024
 
+export interface PageServerOptions {
+  /**
+   * Serve the handler at the origin root, with no random prefix.
+   *
+   * The default prefix is a security measure: it keeps other local processes
+   * from addressing the page, and every vendor whose flow lets us choose the
+   * whole callback URL can use it. A vendor that **validates the shape** of
+   * the callback URL instead cannot: Trae's console accepts only
+   * `http://127.0.0.1:<port>/authorize`, so a prefix makes it refuse the
+   * sign-in before it even looks at the query (measured — see
+   * `docs/vendors.md` §4). With `raw`, the caller is responsible for the
+   * equivalent protection; `vendors/trae/login.ts` checks the trace id it
+   * issued.
+   */
+  raw?: boolean
+}
+
 export class PageServer {
   private closed = false
 
   private constructor(
     private readonly server: Server,
-    /** The page's URL including its random prefix; open this in a browser. */
+    /** The page's URL; open this in a browser. Includes the random prefix unless `raw`. */
     readonly url: string,
   ) {}
 
-  static async start(handler: PageHandler): Promise<PageServer> {
-    const token = randomHex(16)
+  static async start(handler: PageHandler, options: PageServerOptions = {}): Promise<PageServer> {
+    // `raw` keeps an empty prefix, so `handle` matches the origin root.
+    const token = options.raw === true ? "" : randomHex(16)
     const server = createServer((request, response) => {
       void handle(handler, token, request, response)
     })
@@ -65,7 +83,8 @@ export class PageServer {
       server.close()
       throw new Error("the login page server did not get a loopback port")
     }
-    return new PageServer(server, `http://127.0.0.1:${address.port}/${token}/`)
+    const origin = `http://127.0.0.1:${address.port}`
+    return new PageServer(server, token === "" ? `${origin}/` : `${origin}/${token}/`)
   }
 
   /** Stops listening and drops live connections; safe to call twice. */
@@ -85,12 +104,13 @@ async function handle(
 ): Promise<void> {
   try {
     const url = new URL(request.url ?? "/", "http://127.0.0.1")
-    const prefix = `/${token}`
-    if (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
+    // An empty token is `raw` mode: the path is served as it arrives.
+    const prefix = token === "" ? "" : `/${token}`
+    if (prefix !== "" && url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
       write(response, 404, "text/plain; charset=utf-8", "Not found")
       return
     }
-    const path = url.pathname.slice(prefix.length) || "/"
+    const path = prefix === "" ? url.pathname || "/" : url.pathname.slice(prefix.length) || "/"
     const body = await readBody(request)
     let parsed: Record<string, unknown> | undefined
     const result = await handler({

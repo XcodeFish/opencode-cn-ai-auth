@@ -6,7 +6,8 @@
 
 import { describe, expect, test } from "bun:test"
 import type { PageRequest } from "../src/core/local-page.ts"
-import { HTML, PageServer } from "../src/core/local-page.ts"
+import { HTML, notFound, PageServer } from "../src/core/local-page.ts"
+import { at } from "./helpers.ts"
 
 interface Seen {
   method: string
@@ -17,6 +18,47 @@ interface Seen {
 function record(request: PageRequest): Seen {
   return { method: request.method, path: request.path, query: Object.fromEntries(request.query) }
 }
+
+describe("PageServer（raw 模式）", () => {
+  /**
+   * Trae 的控制台用 `^http://127.0.0.1:(\d+)/authorize$` 校验回调地址，
+   * 带随机前缀会被判成非法并直接显示「登录失败 / 网络错误」。所以 raw 模式
+   * 必须把 handler 挂在源站根路径上，且 URL 里不带前缀。
+   */
+  test("raw 模式：URL 无前缀，/authorize 直接送到 handler", async () => {
+    const seen: Seen[] = []
+    const server = await PageServer.start(
+      (request) => {
+        seen.push(record(request))
+        return { contentType: HTML, body: "<h1>raw</h1>" }
+      },
+      { raw: true },
+    )
+    try {
+      expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/)
+      const response = await fetch(new URL("authorize", server.url))
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain("raw")
+      expect(at(seen, 0).path).toBe("/authorize")
+      expect(server.url).not.toContain(at(seen, 0).path.slice(1, 5))
+    } finally {
+      server.close()
+    }
+  })
+
+  test("raw 模式：不在 /authorize 的路径仍由 handler 决定", async () => {
+    const server = await PageServer.start(
+      (request) => (request.path === "/authorize" ? { body: "ok" } : notFound()),
+      { raw: true },
+    )
+    try {
+      expect((await fetch(new URL("authorize", server.url))).status).toBe(200)
+      expect((await fetch(new URL("other", server.url))).status).toBe(404)
+    } finally {
+      server.close()
+    }
+  })
+})
 
 describe("PageServer", () => {
   test("GET 前缀内的根路径，前缀外 404", async () => {

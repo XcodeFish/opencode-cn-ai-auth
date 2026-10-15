@@ -11,6 +11,7 @@ import {
   challengeOf,
   completeSignIn,
   fixNickname,
+  loginMethods,
   newPkce,
   parseCallback,
   refreshCredential,
@@ -44,6 +45,8 @@ describe("登录 URL", () => {
     // 版本号取自厂商自己的客户端 bundle，不是旧构建的值。
     expect(params.get("plugin_version")).toBe("2.3.91092")
     expect(params.get("x_app_version")).toBe("3.4.2")
+    // solo 客户端才会带这一项（官方客户端同款）。
+    expect(params.get("hide_saas_login")).toBe("true")
   })
 
   test("PKCE 校验串符合 RFC 7636 的 S256 形状", () => {
@@ -207,5 +210,61 @@ describe("续期", () => {
         { client: { auth: { set: async () => undefined } }, fetcher },
       ),
     ).rejects.toThrow(/换取登录令牌失败/)
+  })
+})
+
+describe("登录流程的回调形状", () => {
+  /**
+   * 回归：控制台用 `^http://127.0.0.1:(\d+)/authorize$` 校验回调地址，带
+   * 随机路径前缀时它会直接显示「登录失败 / 网络错误」（2026-10-16 无头 Chrome
+   * 实测：换成根路径 /authorize 就出现正常登录界面）。这条断言就是那次回归。
+   */
+  const start = async () => {
+    const method = loginMethods({
+      client: { auth: { set: async () => undefined } },
+      fetcher: cannedFetch([]),
+    })[0]
+    if (method === undefined || method.type !== "oauth") throw new Error("Trae 的登录方式应当是 oauth")
+    return await method.authorize()
+  }
+
+  test("回调地址是源站根路径的 /authorize，没有随机前缀", async () => {
+    const started = await start()
+    const params = new URL(started.url ?? "").searchParams
+    const callback = params.get("auth_callback_url") ?? ""
+    expect(callback).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/authorize$/)
+    // 同一次修复的另一半：URL 必须带 PKCE 参数，否则控制台走的是老分支。
+    expect(params.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(params.get("code_challenge_method")).toBe("S256")
+    // 收尾：打一跳回调让这次登录落定，别把服务留在测试进程里。
+    const payload = new URLSearchParams({
+      loginTraceID: params.get("login_trace_id") ?? "",
+      authCodeInfo: JSON.stringify({ AuthCode: "x" }),
+      userInfo: JSON.stringify({ UserID: "u" }),
+    })
+    expect((await fetch(`${callback}?${payload}`)).status).toBe(200)
+    const result = (await started.callback()) as { type?: string }
+    expect(result.type).toBe("failed")
+  })
+
+  test("回调里的 loginTraceID 与我们发出的不一致时不接受", async () => {
+    const started = await start()
+    const params = new URL(started.url ?? "").searchParams
+    const callback = params.get("auth_callback_url") ?? ""
+    const payload = new URLSearchParams({
+      loginTraceID: "someone-elses-trace",
+      authCodeInfo: JSON.stringify({ AuthCode: "x" }),
+      userInfo: JSON.stringify({ UserID: "u" }),
+    })
+    expect((await fetch(`${callback}?${payload}`)).status).toBe(404)
+    // 用我们自己的 trace id 再来一次：这一跳才算数（随后会因换令牌失败而落定）。
+    const mine = new URLSearchParams({
+      loginTraceID: params.get("login_trace_id") ?? "",
+      authCodeInfo: JSON.stringify({ AuthCode: "x" }),
+      userInfo: JSON.stringify({ UserID: "u" }),
+    })
+    expect((await fetch(`${callback}?${mine}`)).status).toBe(200)
+    const result = (await started.callback()) as { type?: string }
+    expect(result.type).toBe("failed")
   })
 })

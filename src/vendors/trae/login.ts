@@ -154,6 +154,10 @@ export function buildLoginUrl(
     // of trying to mint a refresh token for a legacy client.
     code_challenge: pkce.codeChallenge,
     code_challenge_method: "S256",
+    // The client appends this for `auth_from=solo`; the console hides its
+    // SaaS sign-in entry for a SOLO client, and we are one (our client id is
+    // `authConfig.SOLO.stable`).
+    hide_saas_login: "true",
   })
   return `${TRAE_CONSOLE_BASE}/authorization?${params.toString()}`
 }
@@ -512,24 +516,40 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
         const log = vendorLogger(deps.client, TRAE_ID)
         const settlement = createSettlement<SignInResult>()
 
-        const server = await PageServer.start(async (request): Promise<PageResponse> => {
-          if (!request.path.endsWith(TRAE_CALLBACK_PATH)) return notFound()
-          try {
-            const parsed = parseCallback(`/?${request.query.toString()}`)
-            if (!parsed.ok) {
-              settlement.settle({ type: "failed", error: parsed.reason })
-              return donePage(parsed.reason)
+        // The console validates the callback URL against
+        // `^http://127.0.0.1:(\d+)/authorize$` and refuses the sign-in — with
+        // the "登录失败 / 网络错误" screen — for anything else. A random path
+        // prefix therefore cannot be used here: the server serves the root
+        // path, which is why `raw` exists (`core/local-page.ts`).
+        const traceId = traceIdOf(device.machineId, device.deviceId)
+        const server = await PageServer.start(
+          async (request): Promise<PageResponse> => {
+            if (!request.path.endsWith(TRAE_CALLBACK_PATH)) return notFound()
+            // Nothing else on this machine is expected to post a credential
+            // here, and the console echoes the trace id we issued, so a
+            // mismatch is not ours. An absent one is accepted: the shape of the
+            // callback is the vendor's to change, and refusing it would hang
+            // the sign-in until the timeout instead of reporting a reason.
+            const echoed = request.query.get("loginTraceID")
+            if (echoed !== null && echoed !== traceId) return notFound()
+            try {
+              const parsed = parseCallback(`/?${request.query.toString()}`)
+              if (!parsed.ok) {
+                settlement.settle({ type: "failed", error: parsed.reason })
+                return donePage(parsed.reason)
+              }
+              const credential = await completeSignIn(parsed.callback, device, deps, pkce)
+              settlement.settle(signInResult(credential))
+              return donePage("登录成功")
+            } catch (error) {
+              const message = errorMessage(error)
+              await log.warn(`登录失败：${message}`)
+              settlement.settle({ type: "failed", error: message })
+              return donePage(`登录失败：${message}`)
             }
-            const credential = await completeSignIn(parsed.callback, device, deps, pkce)
-            settlement.settle(signInResult(credential))
-            return donePage("登录成功")
-          } catch (error) {
-            const message = errorMessage(error)
-            await log.warn(`登录失败：${message}`)
-            settlement.settle({ type: "failed", error: message })
-            return donePage(`登录失败：${message}`)
-          }
-        })
+          },
+          { raw: true },
+        )
 
         const timer = setTimeout(() => {
           void log.warn("登录超时，已关闭本地回调页")

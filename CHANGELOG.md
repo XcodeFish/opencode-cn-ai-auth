@@ -2,6 +2,21 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.7.2] - 2026-10-16
+
+### Fixed
+
+- **Trae 登录的「登录失败 / 网络错误」定位到真正的根因：回调地址的形状**。控制台页面
+  挂载时先用 `^http://127.0.0.1:(\d+)/authorize$` 校验 `auth_callback_url`，不匹配就
+  直接切到失败屏（`ep(3)`），而且这一步发生在 `CheckLogin` 之前——所以本机连一个请求
+  都收不到，看起来像网络问题。本包此前用 `PageServer` 的随机路径前缀
+  （`http://127.0.0.1:<port>/<token>/authorize`），正好不匹配。现在 Trae 改用
+  `PageServer` 新增的 `raw` 模式：回调就是源站根路径的 `/authorize`，并以 URL 里下发的
+  `login_trace_id` 做校验（控制台原样回传，其它本机进程伪造的回调对不上）。
+  无头 Chrome 对照实验：同一串参数只改回调形状，带前缀复现失败屏，根路径则出现正常
+  登录界面（手机号 +86 / 获取验证码 / 抖音 / 苹果 / 企业账号）。
+- 顺带补齐官方客户端同款的 `hide_saas_login=true`（solo 客户端才带）。
+
 ## [0.7.1] - 2026-10-16
 
 ### Fixed
