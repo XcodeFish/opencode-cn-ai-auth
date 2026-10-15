@@ -12,8 +12,9 @@
  *   answers `{code, desc, data}` with `code: "000000"` for success, and it
  *   *always* answers HTTP 200, so only `code` says what happened.
  * - `account.xfinfr.com` — xfyun's account service (login, SMS, WeChat
- *   binding). It signs with `Authorization: account {ak}:{sig}`. WeChat
- *   uses the public client constants; optional SMS accepts user overrides.
+ *   binding). It signs with `Authorization: account {ak}:{sig}`, and every
+ *   flow on it — WeChat, WeChat's first-time phone binding and SMS sign-in —
+ *   is signed with the public client constants. User keys only override.
  */
 
 import type { CredentialSpec } from "../../core/credentials.ts"
@@ -55,6 +56,30 @@ export const LOOMY_REQUEST_TIMEOUT_MS = 60_000
 export const LOOMY_SMS_TTL_SECONDS = 300
 
 /**
+ * How long the page waits between two codes for the same number.
+ *
+ * The service does not rate-limit `sendMsgCode` at all: three back-to-back
+ * calls for one number all answered `000000` on 2026-10-15, so this cooldown
+ * is the package's own guard against a user (or a stuck retry) spending the
+ * vendor's SMS quota. 60s is the interval Chinese account services
+ * conventionally allow.
+ *
+ * The cooldown is per number, so a mistyped one can be corrected and sent at
+ * once; volume is bounded by `LOOMY_SMS_SENDS_PER_FLOW` regardless of number.
+ */
+export const LOOMY_SMS_SEND_COOLDOWN_MS = 60_000
+
+/** How many codes one page of the SMS flow may ask for. */
+export const LOOMY_SMS_SENDS_PER_FLOW = 3
+
+/**
+ * The `options` key that turns the SMS sign-in method on and off. It is on
+ * by default: the shipped client AccessKey signs the SMS endpoints just as
+ * well as the QR ones, so an account with no WeChat can still get in.
+ */
+export const LOOMY_SMS_LOGIN_OPTION = "smsLogin"
+
+/**
  * The lifetime the sign-in request asks for: 14 days. The service answers no
  * expiry of its own, so the stored `expires` is this span from sign-in time
  * — a local record, not the vendor's word (`docs/vendors.md`).
@@ -92,7 +117,11 @@ export const LOOMY_WECHAT_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-/** Optional credentials for standalone SMS login; QR uses bundled client constants. */
+/**
+ * User overrides for the AccessKey every account request is signed with.
+ * Optional: unconfigured means the shipped client constants are used, the
+ * same pair the QR flow has always signed with.
+ */
 export const LOOMY_ACCESS_KEY_ID: CredentialSpec = {
   option: "accessKeyId",
   env: "LOOMY_XFYUN_ACCESS_KEY_ID",

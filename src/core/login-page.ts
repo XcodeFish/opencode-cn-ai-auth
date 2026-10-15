@@ -125,8 +125,11 @@ button { width: 100%; margin-top: 12px; padding: 10px; font-size: 14px; color: #
   background: var(--accent); border: 0; border-radius: 8px; cursor: pointer; }
 button:disabled { background: #c9cdd4; cursor: not-allowed; }
 button.cn-quiet { background: #eef0f3; color: #4e5969; }
+/* 「获取验证码」倒计时期间是禁用态；cn-quiet 的底色会盖过 button:disabled。 */
+button.cn-quiet:disabled { background: #eceef1; color: #a3a9b2; }
 .cn-row { display: flex; gap: 8px; align-items: flex-end; }
 .cn-row button { width: auto; white-space: nowrap; padding: 10px 12px; }
+.cn-row input { min-width: 0; }
 .cn-hidden { display: none; }
 footer { margin-top: 16px; font-size: 11px; color: var(--soft); }
 `

@@ -2,6 +2,19 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.3.0] - 2026-10-15
+
+### Added
+
+- Loomy 的短信登录默认可用，不再要求用户自备 AccessKey：随包客户端常量对
+  `account.xfinfr.com` 的短信端点同样有效（2026-10-15 实测 `sendMsgCode` 回
+  `000000`），用户配置的 `accessKeyId`/`accessKeySecret` 改为可选覆盖。
+- `options.smsLogin: false` 可关闭 Loomy 的短信登录方式。
+- 短信登录页改成「验证码输入框 + 获取验证码按钮」同一行，手机号单独一行；按钮点击后
+  进入 60 秒倒计时（读服务端返回的 `retryAfterMs`），倒计时中禁用并显示剩余秒数。
+- 短信登录页自带两道闸：同号码 60 秒冷却、一次登录最多发 3 条（服务端实测无频控）。
+  冷却按号码记账，填错号码可以立刻改正后重发，切回未过期的号码仍会继续倒计时。
+
 ## [0.2.1] - 2026-10-13
 
 ### Fixed

@@ -8,8 +8,13 @@
 
 import { describe, expect, test } from "bun:test"
 import type { AuthMethod, OAuthMethod } from "../src/core/types.ts"
-import { loginMethods, signInResult } from "../src/vendors/loomy/login.ts"
-import { LOOMY_SESSION_TTL_SECONDS } from "../src/vendors/loomy/product.ts"
+import { LOOMY_CLIENT_ACCESS_KEYS } from "../src/vendors/loomy/bundled-credentials.ts"
+import { accountKeys, loginMethods, signInResult } from "../src/vendors/loomy/login.ts"
+import {
+  LOOMY_SESSION_TTL_SECONDS,
+  LOOMY_SMS_SEND_COOLDOWN_MS,
+  LOOMY_SMS_SENDS_PER_FLOW,
+} from "../src/vendors/loomy/product.ts"
 import { at, cannedFetch, fakeClient, headersOf, jpegBytes, jsonOk, textBody, tick } from "./helpers.ts"
 
 const KEYS = { accessKeyId: "ak-test", accessKeySecret: "sk-test" }
@@ -60,36 +65,38 @@ async function withEnvAsync<T>(
 }
 
 describe("loginMethods", () => {
-  test("未配置 AccessKey 时只有微信扫码登录", () => {
+  test("什么都不配时两条路都在：短信登录用的是随包客户端常量", () => {
     withEnv({}, () => {
       const methods = loginMethods({ client: fakeClient(), options: {}, fetcher: cannedFetch([]) })
-      expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录"])
+      expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录", "短信验证码登录"])
       expect(at(methods, 0).type).toBe("oauth")
       expect(at(methods, 0).prompts).toBeUndefined()
     })
   })
 
-  test("只给一半 AccessKey 也开不了短信", () => {
+  test("只给一半 AccessKey 时退回随包常量，短信不消失", () => {
     withEnv({}, () => {
       const methods = loginMethods({
         client: fakeClient(),
         options: { accessKeyId: "ak-test" },
         fetcher: cannedFetch([]),
       })
-      expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录"])
+      expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录", "短信验证码登录"])
+      expect(accountKeys({ accessKeyId: "ak-test" })).toStrictEqual(LOOMY_CLIENT_ACCESS_KEYS)
     })
   })
 
-  test("options 里给全 AccessKey 时有短信方法", () => {
+  test("options 里给全 AccessKey 时用户的键覆盖随包常量", () => {
     withEnv({}, () => {
       const methods = loginMethods({ client: fakeClient(), options: KEYS, fetcher: cannedFetch([]) })
       expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录", "短信验证码登录"])
       expect(at(methods, 1).type).toBe("oauth")
       expect(oauthMethod(methods, 1).prompts).toBeUndefined()
+      expect(accountKeys(KEYS)).toStrictEqual(KEYS)
     })
   })
 
-  test("环境变量里的 AccessKey 同样开短信", () => {
+  test("环境变量里的 AccessKey 覆盖随包常量", () => {
     withEnv(
       {
         LOOMY_XFYUN_ACCESS_KEY_ID: "env-ak",
@@ -98,8 +105,22 @@ describe("loginMethods", () => {
       () => {
         const methods = loginMethods({ client: fakeClient(), options: {}, fetcher: cannedFetch([]) })
         expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录", "短信验证码登录"])
+        expect(accountKeys({})).toStrictEqual({ accessKeyId: "env-ak", accessKeySecret: "env-sk" })
       },
     )
+  })
+
+  test("options.smsLogin 为 false 时只剩微信扫码，用户配了 AccessKey 也一样", () => {
+    withEnv({}, () => {
+      const off = { smsLogin: false }
+      expect(loginMethods({ client: fakeClient(), options: off, fetcher: cannedFetch([]) })).toHaveLength(1)
+      expect(
+        loginMethods({ client: fakeClient(), options: { ...off, ...KEYS }, fetcher: cannedFetch([]) }).map(
+          (method) => method.label,
+        ),
+      ).toStrictEqual(["微信扫码登录"])
+      expect(accountKeys(off)).toBeUndefined()
+    })
   })
 })
 
@@ -156,7 +177,10 @@ describe("短信方法的 authorize / callback", () => {
 
     const send = await postPage(started.url ?? "", "sms", { phone: "138 1234 5678" })
     expect(send.status).toBe(200)
-    expect(JSON.parse(await send.text())).toMatchObject({ ok: true, message: "验证码已发送到 138****5678" })
+    const sentBody = (await send.json()) as { ok: boolean; message: string; retryAfterMs: number }
+    expect(sentBody.ok).toBe(true)
+    expect(sentBody.message).toContain("验证码已发送到 138****5678")
+    expect(sentBody.retryAfterMs).toBe(LOOMY_SMS_SEND_COOLDOWN_MS)
 
     const sendCall = at(fetcher.calls, 0)
     expect(sendCall.url).toBe("https://account.xfinfr.com/login/phone/sendMsgCode")
@@ -189,6 +213,27 @@ describe("短信方法的 authorize / callback", () => {
       msgid: "msg-1",
       expire: 1_209_600,
     })
+  })
+
+  test("获取验证码按钮在验证码输入框右侧，且页面自带倒计时", async () => {
+    const { method } = smsFlow(KEYS)
+    const started = await method.authorize()
+    const html = await (await fetch(started.url ?? "")).text()
+
+    // 同一行里是「验证码输入框 + 获取验证码按钮」，手机号单独一行。
+    const row = html.slice(html.indexOf("cn-row"), html.indexOf("</div>", html.indexOf('id="cn-code"')))
+    expect(row).toContain('id="cn-code"')
+    expect(row).toContain('id="cn-send"')
+    expect(row.indexOf('id="cn-code"')).toBeLessThan(row.indexOf('id="cn-send"'))
+    expect(html).not.toMatch(/id="cn-phone"[\s\S]{0,120}id="cn-send"/)
+
+    // 倒计时读服务端给的 retryAfterMs，并且按号码记账。
+    expect(html).toContain("秒后可重发")
+    expect(html).toContain("data.retryAfterMs")
+    expect(html).toContain("notBefore[target]")
+    expect(html).toContain('phone.addEventListener("input", paint)')
+
+    await started.callback()
   })
 
   test("callback 成功后顺手初始化每日额度", async () => {
@@ -232,6 +277,109 @@ describe("短信方法的 authorize / callback", () => {
     })
     await started.callback()
     expect(fetcher.calls).toHaveLength(0)
+  })
+
+  test("同一号码两次发送之间隔 60 秒，且响应带 retryAfterMs", async () => {
+    let clock = 1_700_000_000_000
+    const fetcher = cannedFetch([
+      {
+        match: "/login/phone/sendMsgCode",
+        respond: jsonOk({ code: "000000", desc: "", data: { msgid: "msg-1" } }),
+      },
+    ])
+    const method = oauthMethod(
+      loginMethods({
+        client: fakeClient(),
+        options: KEYS,
+        fetcher,
+        signInTimeoutMs: 50,
+        now: () => clock,
+      }),
+      1,
+    )
+    const started = await method.authorize()
+    const first = await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    expect((await first.json()) as { ok: boolean }).toMatchObject({ ok: true })
+
+    clock += LOOMY_SMS_SEND_COOLDOWN_MS - 1
+    const tooSoon = await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    expect(tooSoon.status).toBe(429)
+    expect(JSON.parse(await tooSoon.text())).toStrictEqual({
+      ok: false,
+      message: "验证码刚刚已发送，请稍后再试",
+    })
+
+    clock += 1
+    const later = await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    expect((await later.json()) as { ok: boolean }).toMatchObject({ ok: true })
+    expect(fetcher.callsMatching("/login/phone/sendMsgCode")).toHaveLength(2)
+
+    await started.callback()
+  })
+
+  test("换一个号码不受上一个号码的冷却影响（填错了能马上改）", async () => {
+    const clock = 1_700_000_000_000
+    const fetcher = cannedFetch([
+      {
+        match: "/login/phone/sendMsgCode",
+        respond: jsonOk({ code: "000000", desc: "", data: { msgid: "msg-1" } }),
+      },
+    ])
+    const method = oauthMethod(
+      loginMethods({
+        client: fakeClient(),
+        options: KEYS,
+        fetcher,
+        signInTimeoutMs: 50,
+        now: () => clock,
+      }),
+      1,
+    )
+    const started = await method.authorize()
+    const wrong = await postPage(started.url ?? "", "sms", { phone: "13800000000" })
+    expect((await wrong.json()) as { ok: boolean }).toMatchObject({ ok: true })
+
+    // 立刻改成另一个号码：不该被上一个号码的冷却挡住。
+    const right = await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    expect((await right.json()) as { ok: boolean }).toMatchObject({ ok: true })
+    expect(fetcher.callsMatching("/login/phone/sendMsgCode")).toHaveLength(2)
+
+    await started.callback()
+  })
+
+  test("一次登录最多发 3 条，之后不再请求厂商", async () => {
+    let clock = 1_700_000_000_000
+    const fetcher = cannedFetch([
+      {
+        match: "/login/phone/sendMsgCode",
+        respond: jsonOk({ code: "000000", desc: "", data: { msgid: "msg-1" } }),
+      },
+    ])
+    const method = oauthMethod(
+      loginMethods({
+        client: fakeClient(),
+        options: KEYS,
+        fetcher,
+        signInTimeoutMs: 50,
+        now: () => clock,
+      }),
+      1,
+    )
+    const started = await method.authorize()
+    for (let attempt = 0; attempt < LOOMY_SMS_SENDS_PER_FLOW; attempt++) {
+      const sent = await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+      expect((await sent.json()) as { ok: boolean }).toMatchObject({ ok: true })
+      clock += LOOMY_SMS_SEND_COOLDOWN_MS
+    }
+    const extra = await postPage(started.url ?? "", "sms", { phone: "13812345678" })
+    expect(extra.status).toBe(429)
+    expect(JSON.parse(await extra.text())).toStrictEqual({
+      ok: false,
+      message: "验证码发送次数过多，请关闭页面后重新发起登录",
+    })
+    expect(fetcher.callsMatching("/login/phone/sendMsgCode")).toHaveLength(LOOMY_SMS_SENDS_PER_FLOW)
+
+    await started.callback()
   })
 })
 

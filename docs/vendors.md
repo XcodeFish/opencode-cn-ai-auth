@@ -14,25 +14,28 @@
 
 ## 1. 凭据
 
-Loomy 微信扫码及首次手机号绑定使用随包提供的客户端公开常量，用户无需配置。
-可选短信登录仍需用户配置对应值；缺少完整配置时，该短信登录方式不出现。用户配置的
-取值顺序：插件选项 → 环境变量。
+Loomy 的三条账号请求路径——微信扫码、首次手机号绑定、独立短信登录——都使用随包
+提供的客户端公开常量，用户无需配置任何东西。用户配置的取值顺序：插件选项 →
+环境变量，配了就用用户的（用于内嵌常量被厂商旋转时自救），没配就用内嵌的那对。
+`options.smsLogin: false` 可以关掉独立短信登录（默认开）。
 
 | 厂商 | 用途 | 插件选项 | 环境变量 | 从哪里读 |
 |---|---|---|---|---|
-| Loomy | 微信扫码与首次手机号绑定的账号接口签名 | 无 | 无 | 随包提供的 JetHub Loomy 客户端公开常量 |
-| Loomy | 可选的独立短信登录 | `accessKeyId` | `LOOMY_XFYUN_ACCESS_KEY_ID` | 用户为启用短信登录提供的 AccessKeyId |
-| Loomy | 同上 | `accessKeySecret` | `LOOMY_XFYUN_ACCESS_KEY_SECRET` | 用户为启用短信登录提供的 AccessKeySecret |
+| Loomy | 账号接口签名（扫码 / 扫码绑手机号 / 短信登录） | 无 | 无 | 随包提供的 JetHub Loomy 客户端公开常量 |
+| Loomy | 覆盖上面的签名凭据（可选） | `accessKeyId` | `LOOMY_XFYUN_ACCESS_KEY_ID` | 用户自己的 AccessKeyId |
+| Loomy | 同上 | `accessKeySecret` | `LOOMY_XFYUN_ACCESS_KEY_SECRET` | 用户自己的 AccessKeySecret |
+| Loomy | 关掉独立短信登录（可选） | `smsLogin: false` | — | 本包的开关，默认开启 |
 | Raccoon | 短信登录时加密手机号 | `phoneCipherSecret` | `RACCOON_PHONE_CIPHER_SECRET` | 商汤小浣熊客户端渲染层包内的 16 字节 AES 密钥 |
 | Raccoon | OpenCode 组织账号请求头（可选） | `officeIdentity` | — | OpenCode auth store 不保留 Magpie metadata 时手动配置 |
 
-JetHub 的 Loomy QR 登录和首次手机号绑定会自动使用随包客户端常量；用户配置
-`accessKeyId` / `accessKeySecret` 仅用于启用独立短信登录。Raccoon 的
-`phoneCipherSecret` 仍按上表由用户配置。它们都不是用户账号密码或登录 token。
+JetHub 的 Loomy QR 登录和首次手机号绑定会自动使用随包客户端常量；短信登录用的是
+同一对常量（2026-10-15 实测该常量对 `sendMsgCode`/`checkCode` 回 `000000`）。
+Raccoon 的 `phoneCipherSecret` 仍按上表由用户配置。它们都不是用户账号密码或登录
+token。
 一个包里的两家 provider 共享同一份 `options`，键名互不冲突。
 
-仅当需要启用短信登录时，才需要配置 Magpie 插件选项（`<name>` 是
-`magpie plugin list` 里的插件名，也可以用 `cn-ai` 这样的短名）：
+只有在需要覆盖内嵌签名凭据、或要开关某家登录方式时，才需要配置 Magpie 插件选项
+（`<name>` 是 `magpie plugin list` 里的插件名，也可以用 `cn-ai` 这样的短名）：
 
 ```sh
 magpie plugin options <name> '{"accessKeyId": "…", "accessKeySecret": "…", "phoneCipherSecret": "…"}'
@@ -66,7 +69,7 @@ metadata。适配器在插件加载时注册回退模型、V2 integration 登录
 | 方式 | 流程 | 依赖 |
 |---|---|---|
 | 微信扫码登录 | `open.weixin.qq.com/connect/qrconnect`（appid `wx18d60be432287cf8`）→ uuid → 二维码 JPEG → 长轮询 `408/404/405/403/402` 状态机 → 换 `access` | 无需用户配置；使用随包客户端常量，首次绑定手机号时在本地页验证短信 |
-| 短信验证码登录 | 账号基址签名发送验证码（`msgid`，有效期 300s）→ `checkCode` 换 `access` | AccessKeyId + AccessKeySecret |
+| 短信验证码登录 | 账号基址签名发送验证码（`msgid`，有效期 300s）→ `checkCode` 换 `access` | 无（用随包客户端常量；`options.smsLogin: false` 可关闭） |
 
 扫码状态机、`appid`、回调地址来自 JetHub 的实现（redirect 用厂商白名单内的
 `https://loomy.xunfei.cn/oauth/wechat/callback`，本包只负责轮询，不需要接收回调）。
@@ -87,6 +90,20 @@ metadata。适配器在插件加载时注册回退模型、V2 integration 登录
 之后就把这次扫码标成「已兑换」（`WechatSession.exchanged`），后续确认帧不再重放——
 重放会让服务回 `270101`（上游 JetHub `loomy-wechat-login.js` 用
 `state.wechatCode` 锁存同一件事，本包移植时补上）。二维码换代时该标记随旧码一起清零。
+
+**短信登录的错误码与频率。** 2026-10-15 用随包客户端常量对线上实测：错验证码回
+`210105 验证码错误`，`msgid` 过期回 `210106 验证码已失效`，手机号格式非法回
+`010003 请求参数错误`。服务对 `sendMsgCode` **完全没有频控**：同一号码连续三次
+都回 `000000`。因此本页自带两道闸——两次发送之间隔 60 秒
+（`LOOMY_SMS_SEND_COOLDOWN_MS`）、一次登录页最多发 3 条
+（`LOOMY_SMS_SENDS_PER_FLOW`），超过回 429。冷却按**号码**算：填错号码可以立刻改成
+正确的再发（只向新号码发），同一个号码的重复点击则被挡住；次数上限按**这一次登录页**
+算，换号码也共用，因为目标是限制本页发出的短信总量。它们是本包的防误触措施，不是
+厂商行为；服务端若哪天也加上限流，超限消息由厂商 `desc` 直接透出。
+
+页面形状：手机号一行、「验证码输入框 + 获取验证码按钮」一行。按钮点击后禁用并显示
+「N 秒后可重发」（读响应里的 `retryAfterMs`），前端按号码记账，所以切回一个仍在冷却
+的号码会重新显示那个号码剩下的秒数，而不是误以为可以立刻重发。
 
 ### 会话与续期
 
@@ -296,6 +313,13 @@ usage 窗口表达不了硬排除（只有**已知上限**的窗口才会参与�
    从未用过的合法 code 也会被判「第三方鉴权失败」。本包已消除**我们这侧**能把
    同一枚 code 用第二次的那条路（见 §2「微信 code 一次性」），但「合法 code 是否
    仍被接受」只有在真机上扫一次、把那一帧的 `wx_code` 重放给 `bind/auth` 才能定论。
+10. Loomy 的短信登录**只在一个「已注册过 Loomy」的号码上跑通过**。2026-10-15 在
+    magpie 沙箱里用真实号码走完了 `sendMsgCode → checkCode → session`：宿主存下
+    32 位 `access` 与 `phone`，`magpie quota` 读到真实额度，`/models`、
+    `/points/records`、`/chat/completions` 三个端点都回正常结果。仍未验证的是
+    **未注册号码**：`sendMsgCode` 对任意合法号码都回 `000000`（不发短信也回），
+    所以「新号码会直接开通账号」这件事没有证据。上线前应拿一个从未登录过 Loomy 的
+    号码验一次；若服务其实要求先注册，需要在文档与登录页文案里写明。
 
 发现与上述不符的现象时：先改 `src/vendors/<id>/product.ts` 的常量与本文档，
 再补一条回归测试；不要只改实现不留证据。

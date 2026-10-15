@@ -11,14 +11,17 @@
  *
  * **SMS, on the local page.** xfyun's account service takes a phone number
  * and a code. The loopback page keeps this flow compatible with both hosts'
- * OAuth callback shape.
+ * OAuth callback shape. The way in for an account with no WeChat at hand.
  *
- * WeChat uses the public AccessKey shipped in the vendor client. Users scan
- * to sign in; an account not yet bound to a phone completes that step on the
- * local page. Standalone SMS login remains optional and requires user config.
+ * Both flows sign against `account.xfinfr.com` with an AccessKey. That pair
+ * is the public one shipped in the vendor client, so neither flow needs
+ * configuring: SMS used to sit behind a user-supplied `accessKeyId` /
+ * `accessKeySecret`, but the shipped pair signs the same endpoints (probed
+ * live on 2026-10-15), so the flow is on by default and user keys only
+ * override. `loginMethods` has the details.
  */
 
-import { MissingCredentialError, readCredential } from "../../core/credentials.ts"
+import { readCredential } from "../../core/credentials.ts"
 import { errorMessage } from "../../core/errors.ts"
 import type { Fetcher } from "../../core/http.ts"
 import { notFound, type PageRequest, type PageResponse, PageServer } from "../../core/local-page.ts"
@@ -45,6 +48,9 @@ import {
   LOOMY_ID,
   LOOMY_SESSION_TTL_SECONDS,
   LOOMY_SIGN_IN_TIMEOUT_MS,
+  LOOMY_SMS_LOGIN_OPTION,
+  LOOMY_SMS_SEND_COOLDOWN_MS,
+  LOOMY_SMS_SENDS_PER_FLOW,
 } from "./product.ts"
 
 export interface LoomyLoginDeps {
@@ -52,23 +58,42 @@ export interface LoomyLoginDeps {
   client: PluginClient
   fetcher: Fetcher
   signInTimeoutMs?: number
+  /** The clock the SMS cooldown reads; tests pin it, the host leaves it out. */
+  now?: () => number
 }
 
-/** The optional AccessKey pair for standalone SMS login. */
+/**
+ * The AccessKey pair an account request is signed with: the user's, when
+ * they configured one, otherwise the public pair from the vendor client.
+ *
+ * The user's pair wins so a rotation of the shipped one can be worked around
+ * without waiting for a release — the escape hatch `docs/vendors.md`
+ * describes. `options.smsLogin: false` turns the SMS method off entirely.
+ */
 export function accountKeys(options: Record<string, unknown>): LoomyAccountKeys | undefined {
+  if (!smsLoginEnabled(options)) return undefined
   const accessKeyId = readCredential(LOOMY_ACCESS_KEY_ID, options)
   const accessKeySecret = readCredential(LOOMY_ACCESS_KEY_SECRET, options)
-  return accessKeyId === undefined || accessKeySecret === undefined
-    ? undefined
-    : { accessKeyId, accessKeySecret }
+  if (accessKeyId !== undefined && accessKeySecret !== undefined) {
+    return { accessKeyId, accessKeySecret }
+  }
+  return LOOMY_CLIENT_ACCESS_KEYS
 }
 
-function requiredKeys(options: Record<string, unknown>): LoomyAccountKeys {
+/** Whether the SMS sign-in method is offered; on unless explicitly disabled. */
+export function smsLoginEnabled(options: Record<string, unknown>): boolean {
+  return options[LOOMY_SMS_LOGIN_OPTION] !== false
+}
+
+/**
+ * The keys an SMS request signs with. Only the SMS page reaches this, and it
+ * only exists while `accountKeys` answers; the throw is the compiler's, and
+ * a future caller's, reminder of that.
+ */
+function smsKeys(options: Record<string, unknown>): LoomyAccountKeys {
   const keys = accountKeys(options)
-  if (keys !== undefined) return keys
-  const missing =
-    readCredential(LOOMY_ACCESS_KEY_ID, options) === undefined ? LOOMY_ACCESS_KEY_ID : LOOMY_ACCESS_KEY_SECRET
-  throw new MissingCredentialError(missing)
+  if (keys === undefined) throw new Error("短信登录已被 options.smsLogin 关闭")
+  return keys
 }
 
 /**
@@ -589,32 +614,73 @@ interface SmsState {
   phone: string
   msgid?: string
   sent: boolean
+  /** How many codes this page has asked for; the service has no limit of its own. */
+  sends: number
+  /** When a code last went out, for the gap between two sends to one number. */
+  lastSentAt: number
+  /** The number that code went to; a different number is not on cooldown. */
+  lastPhone: string
 }
 
 function renderSmsPage(): string {
   return renderLoginPage({
     title: "登录 Loomy",
-    note: "使用手机号接收验证码",
+    note: "用手机号接收验证码，无需微信",
     accent: "#1f6feb",
     body: `
       <label for="cn-phone">手机号</label>
       <input id="cn-phone" type="tel" inputmode="numeric" maxlength="11" placeholder="11 位手机号">
-      <button id="cn-send" type="button">获取验证码</button>
       <label for="cn-code">短信验证码</label>
-      <input id="cn-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
+      <div class="cn-row">
+        <input id="cn-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
+        <button class="cn-quiet" id="cn-send" type="button">获取验证码</button>
+      </div>
       <button id="cn-verify" type="button">登录</button>`,
     script: `
+  var phone = document.getElementById("cn-phone");
+  var code = document.getElementById("cn-code");
   var send = document.getElementById("cn-send");
   var verify = document.getElementById("cn-verify");
+  var timer = null;
+  // 冷却按号码记（notBefore[号码] = 可重发的时间戳）：改成没发过的号码立刻能发，
+  // 切回刚发过的号码仍然要等满 60 秒，和服务端同一套规则。
+  var notBefore = {};
+  function paint() {
+    if (timer) { clearInterval(timer); timer = null; }
+    var until = notBefore[phone.value.trim()] || 0;
+    var left = Math.ceil((until - Date.now()) / 1000);
+    if (left > 0) {
+      send.disabled = true;
+      send.textContent = left + " 秒后可重发";
+      timer = setInterval(paint, 1000);
+      return;
+    }
+    send.disabled = false;
+    send.textContent = "获取验证码";
+  }
+  phone.addEventListener("input", paint);
   send.addEventListener("click", function () {
+    if (send.disabled) return;
+    var target = phone.value.trim();
+    send.disabled = true;
+    send.textContent = "发送中…";
     cnStatus("cn-status", "正在发送验证码…");
-    cnPost("sms", { phone: document.getElementById("cn-phone").value.trim() })
-      .then(function (data) { cnStatus("cn-status", data.message || "验证码已发送", "ok"); })
-      .catch(function (e) { cnStatus("cn-status", e.message || "发送失败", "err"); });
+    cnPost("sms", { phone: target })
+      .then(function (data) {
+        cnStatus("cn-status", data.message || "验证码已发送", "ok");
+        notBefore[target] = Date.now() + (data.retryAfterMs || 60000);
+        paint();
+        code.focus();
+      })
+      .catch(function (e) {
+        send.disabled = false;
+        send.textContent = "获取验证码";
+        cnStatus("cn-status", e.message || "发送失败", "err");
+      });
   });
   verify.addEventListener("click", function () {
     cnStatus("cn-status", "正在登录…");
-    cnPost("verify", { code: document.getElementById("cn-code").value.trim() })
+    cnPost("verify", { code: code.value.trim() })
       .then(function () { cnDone(null, "登录成功，可以关闭此页面"); })
       .catch(function (e) { cnStatus("cn-status", e.message || "登录失败", "err"); });
   });
@@ -624,7 +690,7 @@ function renderSmsPage(): string {
 
 async function startSmsSignIn(deps: LoomyLoginDeps): Promise<StartedFlow> {
   const settlement = createSettlement<SignInResult>()
-  const state: SmsState = { phone: "", sent: false }
+  const state: SmsState = { phone: "", sent: false, sends: 0, lastSentAt: 0, lastPhone: "" }
   let closed = false
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -681,14 +747,33 @@ async function handleSmsSend(
   state: SmsState,
   request: PageRequest,
 ): Promise<PageResponse> {
+  const now = deps.now?.() ?? Date.now()
   const body = await request.json()
   const phone = mainlandPhone(typeof body.phone === "string" ? body.phone : undefined)
   if (phone === undefined) return jsonFail("请输入有效的 11 位手机号")
+  // The service rate-limits nothing (see `LOOMY_SMS_SEND_COOLDOWN_MS`), so the
+  // page is the only thing standing between a stuck retry and the SMS quota.
+  if (state.sends >= LOOMY_SMS_SENDS_PER_FLOW) {
+    return jsonFail("验证码发送次数过多，请关闭页面后重新发起登录", 429)
+  }
+  // The cooldown is per number: someone who mistyped theirs can correct it and
+  // send at once, while a stuck retry on one number still cannot spend the
+  // quota. Volume is bounded by `LOOMY_SMS_SENDS_PER_FLOW` either way.
+  const waited = now - state.lastSentAt
+  if (state.lastPhone === phone && state.lastSentAt > 0 && waited < LOOMY_SMS_SEND_COOLDOWN_MS) {
+    return jsonFail("验证码刚刚已发送，请稍后再试", 429)
+  }
   try {
-    state.msgid = await sendSmsCode(deps.fetcher, requiredKeys(deps.options), phone)
+    state.msgid = await sendSmsCode(deps.fetcher, smsKeys(deps.options), phone)
+    state.sends += 1
+    state.lastSentAt = now
+    state.lastPhone = phone
     state.phone = phone
     state.sent = true
-    return jsonOk({ message: `验证码已发送到 ${maskPhone(phone)}` })
+    return jsonOk({
+      message: `验证码已发送到 ${maskPhone(phone)}（还可重发 ${LOOMY_SMS_SENDS_PER_FLOW - state.sends} 次）`,
+      retryAfterMs: LOOMY_SMS_SEND_COOLDOWN_MS,
+    })
   } catch (error) {
     state.sent = false
     return jsonFail(errorMessage(error))
@@ -707,7 +792,7 @@ async function handleSmsVerify(
   if (code.length === 0) return jsonFail("请输入短信验证码")
   if (!state.sent || state.msgid === undefined) return jsonFail("请先获取验证码")
   try {
-    const login = await loginWithSmsCode(deps.fetcher, requiredKeys(deps.options), {
+    const login = await loginWithSmsCode(deps.fetcher, smsKeys(deps.options), {
       phone: state.phone,
       code,
       msgid: state.msgid,
@@ -721,7 +806,13 @@ async function handleSmsVerify(
   }
 }
 
-/** The two methods, as the host wants them. */
+/**
+ * The two methods, as the host wants them.
+ *
+ * SMS is second and on by default: the shipped client AccessKey signs its
+ * endpoints, so nothing has to be configured for an account with no WeChat.
+ * `options.smsLogin: false` drops it back to QR only.
+ */
 export function loginMethods(deps: LoomyLoginDeps): AuthMethod[] {
   const methods: AuthMethod[] = [
     {

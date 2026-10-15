@@ -27,7 +27,7 @@ describe("LoomyAuthPlugin 的钩子形状", () => {
     expect(providerOf(hooks).id).toBe("loomy")
     expect(typeof hooks.auth.checkin).toBe("function")
     expect(hooks.auth.refresh).toBeUndefined()
-    expect(hooks.auth.methods.map((method) => method.label)).toStrictEqual(["微信扫码登录"])
+    expect(hooks.auth.methods.map((method) => method.label)).toStrictEqual(["微信扫码登录", "短信验证码登录"])
   })
 
   test("icon 是厂商自己托管的 https 图片（裸图标名会被宿主静默丢弃）", async () => {

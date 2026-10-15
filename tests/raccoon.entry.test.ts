@@ -86,7 +86,8 @@ describe("插件入口", () => {
       body: { extra_body: { thinking: { type: "disabled" } } },
     })
     expect(hooks).toHaveLength(2)
-    expect(integrationUpdates.filter((update) => update.integrationID === "loomy")).toHaveLength(3)
+    // loomy: 两个 oauth 方式（微信 + 短信）+ env + key。
+    expect(integrationUpdates.filter((update) => update.integrationID === "loomy")).toHaveLength(4)
     expect(integrationUpdates.filter((update) => update.integrationID === "raccoon")).toHaveLength(3)
     const loomyOAuth = integrationUpdates.find(
       (update) => update.integrationID === "loomy" && update.method.type === "oauth",

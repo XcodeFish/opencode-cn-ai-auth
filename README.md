@@ -59,7 +59,9 @@ Magpie 仍然从包根入口 `index.ts` 加载两个插件工厂；根入口和�
 ### Loomy
 
 - 微信扫码：插件在 `127.0.0.1` 起一个一次性本地页，展示二维码与状态，扫码后长轮询微信。
-- 短信验证码：插件在 `127.0.0.1` 起本地页，填写手机号并提交验证码。
+- 短信验证码：另一个登录方式（另一张本地页），填写手机号接收验证码即可登录，不需要微信。
+  「获取验证码」在验证码输入框右侧，点击后按钮进入 60 秒倒计时并禁用；同一个号码两次
+  发送之间隔 60 秒，一次登录最多发 3 条；`options.smsLogin: false` 可关闭这一项。
 
 ### Raccoon
 
@@ -68,12 +70,17 @@ Magpie 仍然从包根入口 `index.ts` 加载两个插件工厂；根入口和�
 
 ## 可选登录配置
 
-**讯飞账号 AccessKey**
+**讯飞账号 AccessKey（可选）**
 
 - 选项键：`accessKeyId` / `accessKeySecret`
 - 环境变量：`LOOMY_XFYUN_ACCESS_KEY_ID` / `LOOMY_XFYUN_ACCESS_KEY_SECRET`
-- 微信扫码（包括首次扫码后的手机号绑定）使用随包提供的 Loomy 客户端公开常量，无需自行获取或配置 AccessKey。
-- 这组用户配置只用于启用可选的独立短信登录；必须同时提供两项，短信方式才会出现。
+- 微信扫码、首次扫码后的手机号绑定、独立短信登录都用随包提供的 Loomy 客户端公开常量，无需自行获取或配置 AccessKey。
+- 这两项是**可选覆盖**：厂商若旋转了内嵌常量，用户可以填自己的，配了就用用户的。
+
+**讯飞短信登录开关（可选）**
+
+- 选项键：`smsLogin: false`
+- 默认开启；关掉后 Loomy 只剩微信扫码登录。
 
 **商汤手机号加密密钥**
 
@@ -82,8 +89,9 @@ Magpie 仍然从包根入口 `index.ts` 加载两个插件工厂；根入口和�
 - 只被短信登录用到。
 - 未配置时：短信方式不注册。
 
-Raccoon 的 `phoneCipherSecret` 仍需用户按 [`docs/vendors.md`](docs/vendors.md) 的说明配置。
-只有要启用 Loomy 或 Raccoon 的短信登录时，才需要使用下面的 Magpie 插件选项：
+Raccoon 的 `phoneCipherSecret` 仍需用户按 [`docs/vendors.md`](docs/vendors.md) 的说明配置；
+未配置时 Raccoon 的短信登录不注册。只有在要启用 Raccoon 短信登录、覆盖内嵌凭据或
+关闭 Loomy 短信登录时，才需要使用下面的 Magpie 插件选项：
 
 ```sh
 magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "…", "phoneCipherSecret": "…"}'

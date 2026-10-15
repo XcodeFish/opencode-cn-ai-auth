@@ -39,9 +39,10 @@ Loomy（讯飞）与 Raccoon（商汤小浣熊）的协议事实——端点路�
   ——微信扫码登录，以及首次扫码后的手机号绑定。这对值随官方 Loomy 桌面客户端分发，
   任何人从客户端里都能读出同一对值，**不是使用者的账号凭据**；但它属于厂商，厂商旋转
   或吊销它会让这条登录路径失效，届时需要同步更新本包。
-- **讯飞账号 AccessKey**（仅用于可选的独立短信登录）：**不内嵌**，必须由使用者提供
-  ——写进插件条目的 options（`accessKeyId` / `accessKeySecret`），或设为环境变量
-  `LOOMY_XFYUN_ACCESS_KEY_ID` / `LOOMY_XFYUN_ACCESS_KEY_SECRET`。
+- **讯飞账号 AccessKey 的用户覆盖**（可选）：**不内嵌**，由使用者按需提供——写进插件
+  条目的 options（`accessKeyId` / `accessKeySecret`），或设为环境变量
+  `LOOMY_XFYUN_ACCESS_KEY_ID` / `LOOMY_XFYUN_ACCESS_KEY_SECRET`。配置了就替代上面那对
+  内嵌常量（三条账号路径——扫码、扫码绑手机号、短信登录——一起换）。
 - **商汤手机号加密密钥**（`phoneCipherSecret`）：**不内嵌**，必须由使用者提供——写进
   插件条目的 options，或设为环境变量 `RACCOON_PHONE_CIPHER_SECRET`；未配置时短信登录
   方式不注册。
