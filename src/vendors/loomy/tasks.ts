@@ -17,7 +17,8 @@
 
 import type { Fetcher } from "../../core/http.ts"
 import type { StoredAuth, UsageWindow } from "../../core/types.ts"
-import { fetchOnboarding, type LoomyOnboarding } from "./api.ts"
+import { claimKnownTasks, fetchOnboarding, type LoomyOnboarding, type LoomyOnboardingClaim } from "./api.ts"
+import { LOOMY_CLAIM_TASKS_OPTION } from "./product.ts"
 
 /**
  * How long a task reading may be used.
@@ -49,16 +50,46 @@ export function forgetTaskReadings(): void {
   readings.clear()
 }
 
+/** Whether the card may claim unfinished tasks. Anything but `false` lets it. */
+export function claimTasksEnabled(options: Record<string, unknown>): boolean {
+  return options[LOOMY_CLAIM_TASKS_OPTION] !== false
+}
+
+/**
+ * Drops one account's reading, so the next `usage` reads the service again.
+ *
+ * Called after a claim: the cached flags are the pre-claim ones, and the
+ * card would otherwise keep showing "0/8, 10000 分可领" for the rest of the
+ * TTL right after the tasks were actually claimed — the check-in and the
+ * card refresh land seconds apart, so the stale window is the normal case,
+ * not an edge one.
+ */
+export function forgetTaskReading(auth: StoredAuth | undefined): void {
+  const key = keyOf(auth)
+  if (key !== undefined) readings.delete(key)
+}
+
 /**
  * The account's task state, from the cache when it is fresh and from the
  * service otherwise. A read that fails returns undefined rather than
  * throwing: the card is not worth failing a usage read over.
+ *
+ * When the read says some tasks are still unclaimed, they are claimed right
+ * away — this is the package's only way to complete them without a user
+ * gesture. The host draws the usage card itself and offers no button a plugin
+ * could hook (magpie 0.1.1254: windows are `{name, used, display, …}` with
+ * nothing actionable, and the only check-in buttons disappear once the
+ * account has checked in today), so "claim when noticed" is what a button
+ * would have been. The claim is idempotent and free, and the answer replaces
+ * the reading, so the card's line goes away in the same refresh that would
+ * have shown it.
  */
 export async function taskStateFor(
   fetcher: Fetcher,
   auth: StoredAuth | undefined,
   access: string,
   now = Date.now(),
+  claim = true,
 ): Promise<{ data: LoomyOnboarding; stale: boolean } | undefined> {
   const key = keyOf(auth)
   if (key !== undefined) {
@@ -69,8 +100,29 @@ export async function taskStateFor(
   }
   const result = await fetchOnboarding(fetcher, access)
   if (!result.ok) return undefined
-  if (key !== undefined) readings.set(key, { at: now, data: result.data })
-  return { data: result.data, stale: false }
+  const remaining = Object.keys(result.data.tasks).some((taskKey) => result.data.tasks[taskKey] !== true)
+  if (!claim || !remaining) {
+    if (key !== undefined) readings.set(key, { at: now, data: result.data })
+    return { data: result.data, stale: false }
+  }
+  const claimed = await claimKnownTasks(fetcher, access, result.data)
+  // A refusal leaves the reading as it was; only what was actually handed out
+  // is written down, so the line shows the real remainder (and is retried
+  // when the reading expires).
+  const settled = claimed.ok ? readingAfter(result.data, claimed.data) : result.data
+  if (key !== undefined) readings.set(key, { at: now, data: settled })
+  return { data: settled, stale: false }
+}
+
+/**
+ * The reading as it stands after a claim: the keys it handed out (plus the
+ * ones it skipped) are done, everything else is not.
+ */
+function readingAfter(state: LoomyOnboarding, claim: LoomyOnboardingClaim): LoomyOnboarding {
+  const done = new Set([...claim.claimed, ...claim.skipped])
+  const tasks: Record<string, boolean> = {}
+  for (const key of Object.keys(state.tasks)) tasks[key] = done.has(key)
+  return { tasks, done: done.size, earned: claim.earned, total: claim.total }
 }
 
 /**

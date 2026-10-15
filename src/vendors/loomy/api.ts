@@ -500,11 +500,27 @@ export async function claimOnboardingTasks(
 ): Promise<LoomyRead<LoomyOnboardingClaim>> {
   const state = await fetchOnboarding(fetcher, access)
   if (!state.ok) return state
+  return await claimKnownTasks(fetcher, access, state.data)
+}
+
+/**
+ * Claims the unfinished keys of a reading the caller already has.
+ *
+ * Split out for `tasks.ts`, which reads the flags for the card anyway: going
+ * through `claimOnboardingTasks` there would read the same list twice in a
+ * row. Everything else — the order, the skip, the stop on the first refusal —
+ * is the same as the one-shot version above.
+ */
+export async function claimKnownTasks(
+  fetcher: Fetcher,
+  access: string,
+  state: LoomyOnboarding,
+): Promise<LoomyRead<LoomyOnboardingClaim>> {
   const claimed: string[] = []
   const skipped: string[] = []
-  const doneKeys = Object.keys(state.data.tasks).filter((key) => state.data.tasks[key] === true)
+  const doneKeys = Object.keys(state.tasks).filter((key) => state.tasks[key] === true)
   for (const key of Object.keys(LOOMY_TASK_POINTS)) {
-    if (state.data.tasks[key] === true) {
+    if (state.tasks[key] === true) {
       skipped.push(key)
       continue
     }
@@ -524,7 +540,7 @@ export async function claimOnboardingTasks(
           claimed,
           skipped,
           earned: earnedOf(doneKeys),
-          total: state.data.total,
+          total: state.total,
           done: doneKeys.length,
           error: { code: result.code, message: result.message },
         },
@@ -535,7 +551,7 @@ export async function claimOnboardingTasks(
   }
   return {
     ok: true,
-    data: { claimed, skipped, earned: earnedOf(doneKeys), total: state.data.total, done: doneKeys.length },
+    data: { claimed, skipped, earned: earnedOf(doneKeys), total: state.total, done: doneKeys.length },
   }
 }
 

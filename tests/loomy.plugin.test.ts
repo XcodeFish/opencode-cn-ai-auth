@@ -150,7 +150,8 @@ describe("usage 的接线", () => {
         }),
       },
     ])
-    const hooks = await loomyHooks()
+    // 关掉自动领取，看的才是「读到未完成时长什么样」这件事本身。
+    const hooks = await loomyHooks({ claimTasks: false })
     const usage = hooks.auth.usage
     if (usage === undefined) throw new Error("loomy 必须有 usage 钩子")
     const report = await withFetch(fetcher, () =>
@@ -162,6 +163,47 @@ describe("usage 的接线", () => {
     expect(tasks?.display).toBe("新手任务 2/8 · 已领 1500 / 还有 8500 分可领")
     // 插在钞池之后：今日 + 永久 + 新手任务。
     expect(report.windows?.map((window) => window.name)).toStrictEqual(["今日积分", "永久积分", "新手任务"])
+  })
+
+  test("默认自动领取：卡片读到未完成就领掉，那一行随即消失", async () => {
+    forgetTaskReadings()
+    let claimed = false
+    const fetcher = cannedFetch([
+      {
+        match: "/onboarding/tasks/complete",
+        respond: () => {
+          claimed = true
+          return jsonOk({ code: "000000", data: { alreadyCompleted: false, balance: 500 } })
+        },
+      },
+      {
+        match: "/onboarding/tasks",
+        respond: () =>
+          jsonOk({
+            code: "000000",
+            data: {
+              tasks: claimed ? { first_message: true, share_soul: true } : {},
+              earned: 0,
+              total: 10_000,
+            },
+          }),
+      },
+      {
+        match: "/points/records",
+        respond: jsonOk({
+          code: "000000",
+          data: { balance: 500, dailyBalance: 4000, availableBalance: 4500 },
+        }),
+      },
+    ])
+    const hooks = await loomyHooks()
+    const usage = hooks.auth.usage
+    if (usage === undefined) throw new Error("loomy 必须有 usage 钩子")
+    const report = await withFetch(fetcher, () => usage(async () => AUTH, PROVIDER))
+
+    // 领过了，所以卡片上不再有那一行；请求发的是 complete，不是空转。
+    expect(report.windows?.find((window) => window.name === "新手任务")).toBeUndefined()
+    expect(fetcher.callsMatching("/onboarding/tasks/complete")).toHaveLength(8)
   })
 
   test("任务都领完时卡片上不多这一行", async () => {
@@ -267,6 +309,59 @@ describe("checkin 的接线", () => {
     // 已有的一条不重发，剩下七条各发一次。
     expect(fetcher.callsMatching("/onboarding/tasks/complete")).toHaveLength(7)
     expect(fetcher.callsMatching("/points/first-login")).toHaveLength(1)
+  })
+
+  test("签到领完之后，卡片的下一次读拿到的是新状态（缓存已失效）", async () => {
+    forgetTaskReadings()
+    forgetDailyBalances()
+    const all = Object.fromEntries(
+      [
+        "first_message",
+        "pick_skill",
+        "generate_ppt",
+        "set_schedule",
+        "install_skill",
+        "configure_remote",
+        "create_soul",
+        "share_soul",
+      ].map((key) => [key, true]),
+    )
+    let claimed = false
+    const fetcher = cannedFetch([
+      { match: "/onboarding/tasks/complete", respond: COMPLETE_OK },
+      {
+        match: "/onboarding/tasks",
+        respond: () =>
+          jsonOk({ code: "000000", data: { tasks: claimed ? all : {}, earned: 0, total: 10_000 } }),
+      },
+      { match: "/points/first-login", respond: DAILY },
+      {
+        match: "/points/records",
+        respond: jsonOk({
+          code: "000000",
+          data: { balance: 500, dailyBalance: 4000, availableBalance: 4500 },
+        }),
+      },
+    ])
+    // 关掉自动领取，这条验的是「签到领完之后缓存有没有失效」，
+    // 不然卡片那次读自己就把任务领了，测不到 checkin 的那条路径。
+    const hooks = await loomyHooks({ claimTasks: false })
+    const usage = hooks.auth.usage
+    const checkin = hooks.auth.checkin
+    if (usage === undefined || checkin === undefined) throw new Error("loomy 必须有 usage 与 checkin")
+
+    // 卡片先读一次：还没领，进缓存。
+    const before = await withFetch(fetcher, () => usage(async () => AUTH, PROVIDER))
+    expect(before.windows?.find((w) => w.name === "新手任务")?.display).toContain("0/8")
+
+    // 签到把任务领了。
+    const result = await withFetch(fetcher, () => checkin(async () => AUTH, PROVIDER))
+    expect(result.message).toContain("新手任务补领 8 项")
+    claimed = true
+
+    // 卡片紧接着再读：不能还是「0/8 可领」，否则就是用户看到的那个矛盾。
+    const after = await withFetch(fetcher, () => usage(async () => AUTH, PROVIDER))
+    expect(after.windows?.find((w) => w.name === "新手任务")).toBeUndefined()
   })
 
   test("任务表读不到也不影响签到本身（当日额度照发）", async () => {

@@ -21,7 +21,7 @@ import { loginMethods } from "./login.ts"
 import { fallbackModels, modelsFrom } from "./models.ts"
 import { LOOMY_API_BASE, LOOMY_ICON, LOOMY_ID, LOOMY_NAME, LOOMY_SIGNED_OUT_CODE } from "./product.ts"
 import { accountLabel, rememberedQuota, rememberQuota, requireSession, sessionOf } from "./session.ts"
-import { taskStateFor, tasksWindow } from "./tasks.ts"
+import { claimTasksEnabled, forgetTaskReading, taskStateFor, tasksWindow } from "./tasks.ts"
 import { checkinResult, quotaForNow, usageReport } from "./usage.ts"
 
 /** Where this vendor's models are reached; see `core/plugin.ts`. */
@@ -100,11 +100,13 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
       // `points/records` states the day's quota once a check-in has happened:
       // keep it, so the daily pool can be a window the host routes by.
       await rememberQuota(client, context.provider.id, auth, today.dailyQuota, today.dailyCycleDate)
-      // The new-user tasks are shown beside the pools: their claim rides on
-      // `auth.checkin`, whose message the host only prints on failure, so the
-      // card would otherwise never say where they stand (`tasks.ts`). A read
-      // that fails just leaves the line out.
-      const tasks = tasksWindow((await taskStateFor(fetch, auth, access))?.data)
+      // The new-user tasks are shown beside the pools, and claimed as soon as
+      // this read notices any are left: the host draws the card itself and
+      // offers a plugin no button, so "claim when noticed" is what a button
+      // would have been (`tasks.ts`). `options.claimTasks: false` keeps this
+      // read-only. A read that fails just leaves the line out.
+      const state = await taskStateFor(fetch, auth, access, Date.now(), claimTasksEnabled(options))
+      const tasks = tasksWindow(state?.data)
       return usageReport(today, {
         ...(accountLabel(auth) === undefined ? {} : { user: accountLabel(auth) as string }),
         ...(tasks === undefined ? {} : { extraWindows: [tasks] }),
@@ -146,6 +148,10 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
         }
         await log.warn(`新手任务领取失败：${tasks.message}`)
       }
+      // The card's reading predates this claim; drop it so the next `usage`
+      // reads the service again instead of showing "N/8 可领" for the rest of
+      // the TTL right after the tasks were claimed (`tasks.ts`).
+      forgetTaskReading(auth)
       return checkinResult(grant.data, tasks.ok ? tasks.data : undefined)
     },
   }

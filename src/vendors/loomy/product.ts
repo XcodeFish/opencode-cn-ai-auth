@@ -73,6 +73,14 @@ export const LOOMY_SMS_SEND_COOLDOWN_MS = 60_000
 export const LOOMY_SMS_SENDS_PER_FLOW = 3
 
 /**
+ * The `options` key that turns the new-user task claim off. It is on by
+ * default: the host gives a plugin no button to press, so claiming as soon as
+ * the usage card notices unfinished tasks is the only way they get done.
+ * Turning it off leaves `usage` strictly read-only.
+ */
+export const LOOMY_CLAIM_TASKS_OPTION = "claimTasks"
+
+/**
  * The `options` key that turns the SMS sign-in method on and off. It is on
  * by default: the shipped client AccessKey signs the SMS endpoints just as
  * well as the QR ones, so an account with no WeChat can still get in.
