@@ -1,7 +1,10 @@
 /**
  * 保护根 index.ts：magpie 会把入口模块的每个函数导出都当成插件工厂调用
- * （`internal/plugin/host.js` 的 `servers()`），所以入口只允许两个插件工厂，
- * 且每个工厂都能在没有宿主时装配出各自 provider 的钩子。
+ * （`internal/plugin/host.js` 的 `servers()`），所以入口只允许插件工厂本身
+ * （不导出工具函数或常量），且每个工厂都能在没有宿主时装配出各自 provider 的钩子。
+ *
+ * 每加一家厂商，这一条断言就要多一个名字：漏掉的话，一个辅助函数被导出会被
+ * 宿主当成第四家厂商调用。
  */
 
 import { describe, expect, test } from "bun:test"
@@ -11,15 +14,24 @@ import raccoonOpenCode from "../opencode/raccoon.ts"
 import { fakeClient, providerOf } from "./helpers.ts"
 
 describe("插件入口", () => {
-  test("只导出两个插件工厂", () => {
-    expect(Object.keys(entry).sort()).toStrictEqual(["LoomyAuthPlugin", "RaccoonAuthPlugin"])
+  test("只导出插件工厂，不导出工具函数或常量", () => {
+    expect(Object.keys(entry).sort()).toStrictEqual([
+      "LoomyAuthPlugin",
+      "RaccoonAuthPlugin",
+      "TraeAuthPlugin",
+    ])
     expect(typeof entry.LoomyAuthPlugin).toBe("function")
     expect(typeof entry.RaccoonAuthPlugin).toBe("function")
+    expect(typeof entry.TraeAuthPlugin).toBe("function")
   })
 
-  test("两个工厂都能装配出各自 provider 的钩子", async () => {
+  test("三个工厂都能装配出各自 provider 的钩子", async () => {
     const input = { client: fakeClient() }
-    const [loomy, raccoon] = await Promise.all([entry.LoomyAuthPlugin(input), entry.RaccoonAuthPlugin(input)])
+    const [loomy, raccoon, trae] = await Promise.all([
+      entry.LoomyAuthPlugin(input),
+      entry.RaccoonAuthPlugin(input),
+      entry.TraeAuthPlugin(input),
+    ])
     expect(loomy.auth.provider).toBe("loomy")
     expect(providerOf(loomy).id).toBe("loomy")
     expect(typeof loomy.auth.checkin).toBe("function")
@@ -28,6 +40,12 @@ describe("插件入口", () => {
     expect(raccoon.auth.checkin).toBeUndefined()
     expect(typeof raccoon.auth.refresh).toBe("function")
     expect(loomy.auth.refresh).toBeUndefined()
+    // Trae 两项写钩子都有：签到是这次接入的目的，续期是轮转型 token 必需的。
+    expect(trae.auth.provider).toBe("trae")
+    expect(providerOf(trae).id).toBe("trae")
+    expect(typeof trae.auth.checkin).toBe("function")
+    expect(typeof trae.auth.refresh).toBe("function")
+    expect(trae.auth.refreshLead).toBe(5 * 60 * 1000)
   })
 
   test("OpenCode 子入口遵守 V2 的 id/setup 契约", async () => {

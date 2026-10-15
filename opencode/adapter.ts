@@ -15,14 +15,14 @@ interface OpenCodeProviderEditor {
   add(input: { info: Record<string, unknown>; models: readonly Record<string, unknown>[] }): void
 }
 
-interface OpenCodeContext {
+export interface OpenCodeContext {
   options?: unknown
   provider?: {
     transform(callback: (editor: OpenCodeProviderEditor) => void): Promise<unknown>
   }
   session?: {
     hook(
-      name: "http.request",
+      name: "http.request" | "http.response",
       callback: (event: unknown) => void | Promise<void>,
       options?: Record<string, unknown>,
     ): Promise<unknown>
@@ -64,6 +64,43 @@ interface OpenCodeCredentialOAuth {
   metadata?: Record<string, unknown>
 }
 
+/**
+ * What a request/response rewrite is given.
+ *
+ * The credential is the live one — resolved per request rather than at setup
+ * — because a sign-in can be renewed while the session is running. `metadata`
+ * is where fields a vendor's protocol needs but the V2 credential schema has
+ * no room for are kept (Trae's device fingerprints, for instance).
+ */
+export interface OpenCodeCredential {
+  access: string
+  metadata: Record<string, unknown>
+}
+
+export interface OpenCodeBridge {
+  /**
+   * Rewrite the provider's outgoing request.
+   *
+   * Returning `undefined` keeps the request exactly as the host built it. A
+   * vendor whose chat endpoint is not OpenAI's (Trae) changes the URL, the
+   * headers and the body here.
+   */
+  request?: (
+    request: Request,
+    credential: OpenCodeCredential,
+  ) => Promise<Request | undefined> | Request | undefined
+  /**
+   * Rewrite the provider's answer, after `request` has run.
+   *
+   * Returning `undefined` hands the host the upstream response unchanged.
+   */
+  response?: (
+    response: Response,
+    request: Request,
+    credential: OpenCodeCredential,
+  ) => Promise<Response | undefined> | Response | undefined
+}
+
 export interface OpenCodeVendorDefinition {
   id: string
   name: string
@@ -80,6 +117,19 @@ export interface OpenCodeVendorDefinition {
   ) => Promise<Pick<OpenCodeCredentialOAuth, "access" | "refresh" | "expires">>
   /** Translate a host variant id to the vendor request body. */
   variantBody?: (effort: string) => Record<string, unknown>
+  /**
+   * Environment variables that carry the extra credential fields of a bridge
+   * vendor, for the env/key sign-in methods (see `credentialFromOptions`).
+   */
+  credentialEnv?: Record<string, string>
+  /**
+   * Rewrite the provider's requests and answers.
+   *
+   * Only a vendor whose endpoint is not OpenAI-compatible needs this (Trae);
+   * the other two speak the protocol already. When present, the adapter
+   * installs the host's request/response hooks, if the host offers them.
+   */
+  bridge?: OpenCodeBridge
 }
 
 function optionsOf(value: unknown): Record<string, unknown> {
@@ -170,10 +220,12 @@ function oauthCredential(result: SignInResult, methodID: string): OpenCodeCreden
       : refresh.length > 0
         ? 0
         : Number.MAX_SAFE_INTEGER
-  // V2 credentials are keyed by the registered method. Magpie's accountId is
-  // retained as metadata because the V2 schema does not have a top-level
-  // accountId field.
-  const metadata = typeof result.accountId === "string" ? { accountId: result.accountId } : undefined
+  // V2 credentials are keyed by the registered method, and the schema has no
+  // room for anything else the sign-in learned — a vendor's device
+  // fingerprints, its account id. Those are kept under `metadata`, which is
+  // the one field the schema leaves open; dropping them here would leave an
+  // account that cannot build a request.
+  const metadata = credentialMetadata(result)
   return {
     type: "oauth",
     methodID,
@@ -190,6 +242,97 @@ function credentialAccess(value: unknown): string | undefined {
   if (typeof access === "string" && access.length > 0) return access
   const key = credential.key
   return typeof key === "string" && key.length > 0 ? key : undefined
+}
+
+/**
+ * Everything the sign-in learned that the V2 credential schema has no field
+ * for, kept under `metadata`.
+ *
+ * `SignInResult` allows arbitrary extra keys, and a vendor's protocol may
+ * depend on them: Trae identifies a device by two hex fingerprints handed out
+ * once at sign-in, so losing them here leaves the account unable to build a
+ * request at all.
+ */
+function credentialMetadata(result: SignInResult): Record<string, unknown> | undefined {
+  const reserved = new Set(["type", "access", "key", "refresh", "expires", "provider"])
+  const metadata: Record<string, unknown> = {}
+  for (const [name, value] of Object.entries(result)) {
+    if (reserved.has(name) || value === undefined) continue
+    metadata[name] = value
+  }
+  return Object.keys(metadata).length === 0 ? undefined : metadata
+}
+
+/** The metadata a credential carries; the empty object when it carries none. */
+function metadataOf(value: unknown): Record<string, unknown> {
+  const credential = optionsOf(value)
+  return optionsOf(credential.metadata)
+}
+
+/** The live credential, in the shape a bridge gets. */
+export interface OpenCodeCredential {
+  access: string
+  metadata: Record<string, unknown>
+}
+
+async function activeCredential(
+  context: OpenCodeContext,
+  integrationID: string,
+): Promise<OpenCodeCredential | undefined> {
+  const connection = context.integration?.connection
+  if (connection === undefined) return undefined
+  try {
+    const active = await connection.active(integrationID)
+    if (active === undefined) return undefined
+    const resolved = await connection.resolve(active)
+    const access = credentialAccess(resolved)
+    if (access === undefined) return undefined
+    return { access, metadata: metadataOf(resolved) }
+  } catch {
+    // A missing or expired integration is left to the host's own error path.
+    return undefined
+  }
+}
+
+/**
+ * The fields a credential built from plugin options carries.
+ *
+ * The env/key sign-in methods hand the host only a token, so a vendor whose
+ * protocol needs more than a token (Trae carries two device fingerprints and
+ * an account id in its headers) names the extra variables in `credentialEnv`;
+ * a value given in `options` wins over the variable.
+ */
+function credentialFromOptions(
+  options: Record<string, unknown>,
+  credentialEnv: Record<string, string> | undefined,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {}
+  for (const name of ["uid", "machineId", "deviceId", "nickname", "enterpriseId", "accountId"]) {
+    const fromOptions = options[name]
+    const value =
+      typeof fromOptions === "string" && fromOptions.length > 0 ? fromOptions : readEnv(credentialEnv?.[name])
+    if (value !== undefined) metadata[name] = value
+  }
+  return metadata
+}
+
+/** An environment variable's value, when the host process has one. */
+function readEnv(name: string | undefined): string | undefined {
+  if (name === undefined) return undefined
+  const value = process.env[name]
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+/** The request an `http.request` event carries, whichever shape it uses. */
+function requestOf(event: unknown): Request | undefined {
+  const value = optionsOf(event)
+  return value.request instanceof Request ? value.request : undefined
+}
+
+/** The response an `http.response` event carries. */
+function responseOf(event: unknown): Response | undefined {
+  const value = optionsOf(event)
+  return value.response instanceof Response ? value.response : undefined
 }
 
 async function activeAccess(context: OpenCodeContext, integrationID: string): Promise<string | undefined> {
@@ -293,7 +436,12 @@ export function openCodePlugin(definition: OpenCodeVendorDefinition): {
       }
       await context.provider.transform((editor) => editor.add({ info, models }))
       await registerIntegration(context, definition, options)
-      if (access !== undefined && context.session !== undefined) {
+      if (definition.bridge !== undefined) {
+        // A bridge vendor writes its own auth headers, so the generic bearer
+        // hook is not installed for it: the two would fight over
+        // `Authorization`, and the order they run in is the host's to choose.
+        await installBridge(context, definition, options, access)
+      } else if (access !== undefined && context.session !== undefined) {
         await context.session.hook(
           "http.request",
           (event) => addAuthHeaders(event, definition.baseURL, access),
@@ -312,5 +460,61 @@ export function openCodePlugin(definition: OpenCodeVendorDefinition): {
         )
       }
     },
+  }
+}
+
+/**
+ * Install a bridge vendor's request and response rewrites.
+ *
+ * Both hooks are optional in the host contract, so each is installed only
+ * when the host offers `session.hook` and the definition supplies that half.
+ * A host that has no response hook leaves the vendor with a response it
+ * cannot read — that is reported rather than hidden, because the alternative
+ * is a model that answers with another protocol's bytes and no explanation.
+ */
+async function installBridge(
+  context: OpenCodeContext,
+  definition: OpenCodeVendorDefinition,
+  options: Record<string, unknown>,
+  staticAccess: string | undefined,
+): Promise<void> {
+  const bridge = definition.bridge
+  const session = context.session
+  if (bridge === undefined || session === undefined) return
+
+  const credentialNow = async (): Promise<OpenCodeCredential | undefined> => {
+    if (staticAccess !== undefined) {
+      return { access: staticAccess, metadata: credentialFromOptions(options, definition.credentialEnv) }
+    }
+    return await activeCredential(context, definition.id)
+  }
+
+  if (bridge.request !== undefined) {
+    await session.hook(
+      "http.request",
+      async (event) => {
+        const credential = await credentialNow()
+        const request = requestOf(event)
+        if (credential === undefined || request === undefined) return
+        const next = await bridge.request?.(request, credential)
+        if (next !== undefined) optionsOf(event).request = next
+      },
+      { providerID: definition.id },
+    )
+  }
+
+  if (bridge.response !== undefined) {
+    await session.hook(
+      "http.response",
+      async (event) => {
+        const credential = await credentialNow()
+        const response = responseOf(event)
+        const request = requestOf(event)
+        if (credential === undefined || response === undefined || request === undefined) return
+        const next = await bridge.response?.(response, request, credential)
+        if (next !== undefined) optionsOf(event).response = next
+      },
+      { providerID: definition.id },
+    )
   }
 }

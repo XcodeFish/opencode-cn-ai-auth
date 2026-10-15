@@ -8,7 +8,7 @@ magpie（OpenCode 形状的插件宿主）。本文说明分层、边界和几�
 
 ## 1. 为什么是 provider 插件
 
-方案评审（V2）的结论：两家厂商的能力——登录取凭据、按账号续期、按账号拉模型表、
+方案评审（V2）的结论：各厂商的能力——登录取凭据、按账号续期、按账号拉模型表、
 读积分、每日签到——都需要网络、跨请求状态和宿主能力。middleware 跑在网关进程的
 受限执行环境里（只注入 `console`，请求钩子 250ms、无 `fetch`、无定时器、不能落盘），
 承载不了这些。因此：
@@ -24,6 +24,7 @@ index.ts                 入口：只导出插件工厂（见 §3）
 src/core/                基座：与宿主契约、与厂商无关的能力
 src/vendors/loomy/       讯飞 Loomy
 src/vendors/raccoon/     商汤小浣熊
+src/vendors/trae/        TRAE（字节跳动）
 tests/                   bun test；用离线 fetcher 驱动，不发真实请求
 scripts/check.ts         入口形状门禁（随 bun run verify 执行）
 ```
@@ -58,7 +59,7 @@ flowchart LR
 ```
 
 - `src/core/**` **不 import** `src/vendors/**`：基座不知道厂商存在。
-- `src/vendors/<a>/**` **不 import** `src/vendors/<b>/**`：两家厂商互不依赖，
+- `src/vendors/<a>/**` **不 import** `src/vendors/<b>/**`：各厂商互不依赖，
   共用能力下沉到 `core`，而不是横向复用。
 - 只有 `src/vendors/<id>/index.ts` 组装 `defineVendor`；同目录的其他模块不碰宿主
   契约，只接收 `Fetcher` 和普通数据，因此可以在没有宿主的情况下单测。
@@ -99,7 +100,19 @@ flowchart LR
 | `login.ts` | 登录方式（`AuthMethod[]`）与本地页流程 |
 | `balance.ts` | 带 TTL 的额度读数缓存，以及"锁定永久积分"的请求门禁（只有需要时才存在） |
 | `sign.ts` / `thinking.ts` | 该厂商独有的签名或 wire 方言（只有需要时才存在） |
+| `wire.ts` | 请求体与响应流的双向改写（只有非 OpenAI 兼容的厂商才存在） |
+| `credits.ts` | 积分与签到（额度窗口与 `CheckinResult` 一起，因为两者读同一批端点） |
 | `index.ts` | 唯一的装配点：`defineVendor` 定义 provider |
+
+TRAE 的目录是这套结构的第一个反例检验，也是 `api.ts` 这个名字第一次装两件事的
+地方：它既放 HTTP 方言（请求头、凭据结构、业务码），也放 wire 解析（目录解析、
+SSE 分帧），因为那些都是**纯函数**、都同样需要脱离宿主单测。真正的宿主接触面
+仍然只有 `index.ts` 一个文件，另两家如此，Trae 也如此。
+
+`wire.ts` 存在的理由值得单记：Loomy / Raccoon 的 loader.fetch 只需在请求上补字段
+（`core/request.ts` 的 `patchingJsonBody`），响应原样交给宿主；TRAE 的**请求体与响应
+都不是 OpenAI**，所以它多了一层「进也改、出也改」的桥。这一层写成 `Request`/`Response`
+进出的纯函数，OpenCode 入口将来可以直接复用同一份字节。
 
 ## 3. 与宿主的边界
 
@@ -119,12 +132,19 @@ Magpie 加载一个插件目录时会取其中一个入口文件，并对该模�
 `defineVendor` 是 Magpie 入口唯一接触宿主契约的地方，它把每个厂商定义映射成
 `config`、`auth` 和 `provider` 钩子；OpenCode 走下面这套独立适配边界。
 
-直接 OpenCode 使用 `opencode/loomy.ts` 或 `opencode/raccoon.ts`，每个子入口只暴露
-OpenCode V2（V1 不在支持矩阵内）的 `default.{ id, setup }`。适配器通过 `ctx.provider.transform` 注册
-OpenAI-compatible provider 和回退模型，并通过 `http.request` 注入 token。OpenCode
-不会消费 Magpie 的 `usage`、`checkin` 和账号 metadata 扩展；Raccoon 的 refresh token
-只通过 V2 integration 的续期回调接入。根入口的 Magpie 工厂与两个 V2 子入口是两套
-独立宿主契约。
+直接 OpenCode 使用 `opencode/loomy.ts`、`opencode/raccoon.ts` 或 `opencode/trae.ts`，
+每个子入口只暴露 OpenCode V2（V1 不在支持矩阵内）的 `default.{ id, setup }`。适配器通过
+`ctx.provider.transform` 注册 OpenAI-compatible provider 和回退模型，并通过 `http.request`
+注入 token。OpenCode 不会消费 Magpie 的 `usage`、`checkin` 和账号 metadata 扩展，因此
+**一键签到只有 Magpie 侧有**；Raccoon 的 refresh token 只通过 V2 integration 的续期回调接入。
+
+TRAE 是第一个需要 `bridge` 的子入口：它不兼容 OpenAI，适配器因此额外安装
+`http.request` 与 `http.response` 两个 hook，把请求与响应交给
+`opencode/trae.ts` 的改写函数 —— 那就是 `src/vendors/trae/wire.ts` 里同一份
+`toSoloBody` / `bridgeResponse`。这也是当初把那两个函数写成 `Request`/`Response`
+进出的原因：同一份字节服务两个宿主。桥用到的设备指纹放在凭据的 `metadata` 里，
+因为 V2 的凭据结构没有它们的字段。根入口的 Magpie 工厂与三个 V2 子入口是两套独立
+宿主契约。
 
 ```
 config(config)        → config.provider[id] ??= { name, npm, api, models }
@@ -212,13 +232,13 @@ AccessKey、手机号加密密钥这类值属于厂商客户端，不属于本�
 存储，组织码读丢之后请求会打到个人账号（`X-Org-Code` 为空），而账号名也会退
 回服务端自动生成的默认值。
 
-### 4.7 图标：一个包两个 provider，图标必须由各自的 `auth.icon` 给出
+### 4.7 图标：一个包多个 provider，图标必须由各自的 `auth.icon` 给出
 
 图标有两条互不相通的通道，规则不同：
 
 | 通道 | 谁读 | 接受什么 | 本包的落点 |
 |---|---|---|---|
-| `auth.icon` | provider 行、账号、额度卡片 | **只有** `https://` 图片网址或 `data:image/` URI（图片本身 ≤ 1 MB） | 各厂商 `product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON`，经 `defineVendor` 的 `icon` |
+| `auth.icon` | provider 行、账号、额度卡片 | **只有** `https://` 图片网址或 `data:image/` URI（图片本身 ≤ 1 MB） | 各厂商 `product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON` / `TRAE_ICON`，经 `defineVendor` 的 `icon` |
 | `registry.json` 的 `icon` | 插件市场卡片、插件行 | 社区内置图标名（`internal/gui/assets/icons/<name>.svg`） | 一个包一个值，只能代表一家（见 `developing.md` §4.1） |
 
 **关键点在于 `auth.icon` 只接受网址或 data URI**：写 `spark-color` 这类内置
@@ -232,7 +252,7 @@ AccessKey、手机号加密密钥这类值属于厂商客户端，不属于本�
 代价是图片可能失效——失效时宿主回落到市场图标，只损失一个图标，不影响 provider
 的加载与功能，所以这个取舍是安全的。
 
-**一个包里的两个 provider 必须有各自的图标**：包级的 `package.json` 的
+**一个包里的每个 provider 必须有各自的图标**：包级的 `package.json` 的
 `magpie.icon` 是「这个包里没自己声明图标的 provider」共用的兜底值，用它作两家
 厂商的图标就等于两家都画错。图标按 provider 声明后，一家配错不影响另一家
 （实测时正是这样：只有被改的那一家丢了图标）。
@@ -248,7 +268,7 @@ AccessKey、手机号加密密钥这类值属于厂商客户端，不属于本�
 HTTP 状态判断登录态（401 标记失效、2xx 清除），插件在这一层不改写信封。403
 **不要**翻译成失效：它不是「认证失败」的同义词（额度、权限、安全策略、地域限制
 都用它），一刀切会把别的问题误报成需要重新登录 —— 理由与实测出处见
-`vendors.md` §4 第 8 条。
+`vendors.md` §5 第 8 条。
 
 登录态失效的正常上报路径是 `usage` / `provider.models` / `auth.checkin`：见到厂商的
 失效码就返回 `signIn: "expired"` 或抛 `SignInExpiredError`，宿主据此标记账号。
@@ -270,10 +290,12 @@ Loomy 的当日上限只有签到应答会说，因此签到与 usage 都把它�
 
 - **不做 middleware**（见 §1）。
 - **不代管浏览器/不读用户浏览器 cookie**：登录要么是厂商的开放流程，要么是本地页。
-- **不静默执行有副作用的动作**：写远端状态只发生在用户按得下去的地方。Loomy 的新手
-  任务领奖挂在 `auth.checkin`（宿主的唯一写钩子，也是 `Check in now` 按的那个），
-  不是后台偷偷跑；没有对应钩子的一次性奖励（Raccoon 的 3000 分）不做，只在文档里
-  说明去哪里领。
+- **写远端状态要为了用户明确的权益，并尽量落在用户按得下去的地方**：Loomy 的新手
+  任务领取既挂在 `auth.checkin`（`Check in now` / 每日签到按的那个），也挂在
+  `auth.usage` 读到未完成的时候——宿主不给插件任何按钮，卡片就是用户看的地方，
+  所以「读到就领」是这里唯一可能的按钮等价物；它是幂等的、免费的，且
+  `options.claimTasks: false` 可以让 `usage` 回到严格只读。没有对应钩子的一次性
+  奖励（Raccoon 的 3000 分）仍然不做，只在文档里说明去哪里领。
 - **不引入运行时依赖**：只用 Node/Bun 内置模块（`node:crypto`、`node:http`），
   QR 编码器等能力自带实现（见 `THIRD_PARTY_NOTICES.md`）。
 - **不自建缓存或落盘**：唯一的持久状态是宿主的账号存储；插件内部的缓存必须能从

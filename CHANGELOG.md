@@ -2,6 +2,52 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.7.0] - 2026-10-16
+
+### Added
+
+- **新增第三家 provider：TRAE（字节跳动）**，`provider id = trae`，只做国内版客户端。
+  与另两家不同，Trae 的 `POST /api/agent/v3/llm_utils_chat` **不是 OpenAI 兼容通道**：
+  请求体要转成 SOLO 形状（强制 `stream`、注入 `function` 通道、`model` 与 `config_name`
+  双写、字符串 `content` 变 `[{type:"text"}]`、assistant 的 `tool_calls[].function` 改名
+  `function_call`、`tools[].function.parameters` 序列化成 JSON 字符串），响应要从 SOLO
+  私有 SSE（`output` / `token_usage` / `done` / `error`）转回 OpenAI chunk。两件事都在
+  `loader` 返回的 `fetch` 里做（`src/vendors/trae/wire.ts`），非流式请求由该层聚合。
+- **模型目录按通道合并**：`batch_get_detail_param` 一次查多个通道，同一模型出现在多个
+  通道时取信息更全的一条（能声明推理档位的胜出，否则按 `TRAE_CHANNELS` 优先），并把
+  每个模型来自哪个通道记住 —— 模型只在列出它的通道里可调用，发错通道会在流内回
+  `4001`。过滤与官方选择器一致：非 `chat_completion`、已停用、对用户隐藏的条目剔除。
+- **一键签到**：`auth.checkin` 先查 `checkin_credits/status`（活动未开放报
+  `ineligible`，当天已领报 `done`，都不发写请求），再 `claim`；因为 claim 响应不含
+  积分数，成功后再查一次 status 取实际所得，避免卡片显示「成功 +0」。业务码 `9074`
+  如实报失败并给重试提示（不自动换设备重试），字符串形式的 `"9074"` 也认。
+- **登录**：浏览器授权 + 本机回环回调。回调参数是 `auth_callback_url`，回调直接回传
+  token（不是 OAuth 的 `?code=`）；授权页的 PKCE 分支如实报「流程暂不支持」而不是
+  「缺凭据」。登录态里带两个 32 位 hex 设备指纹（`machineId` / `deviceId`），续期时
+  原样保留 —— 换值会看起来像新机器，也会让按设备计次的签到额度翻倍。
+- **OpenCode 子入口** `opencode/trae.ts`：Trae 在 OpenCode 侧同样需要改写请求与响应，
+  因此适配器（`opencode/adapter.ts`）新增 `bridge` 能力（安装 `http.request` /
+  `http.response` 两个 hook）与 `credentialEnv`（粘贴 token 时从环境变量读设备指纹）。
+  改写复用 Magpie 侧同一份 `wire.ts`。**OpenCode 不消费 `auth.checkin`，一键签到只在
+  Magpie 侧**。
+- 图标取自厂商自己页面声明的 `<link rel="icon">`（48x48 PNG）；`docs/vendors.md` §4
+  记录了 Trae 的协议事实与出处，§5 第 11–16 条记录尚未验证的边界（含「Magpie 是否
+  消费合成的流式 Response」与「OpenCode 的 hook 能否替换对象」两个待探针的前提）。
+
+### Fixed
+
+- **流式改写把控制器关两次**：`bridgeResponse` 在读流出错时先 `error()` 再在 `finally`
+  里 `close()`，后者会抛 `Invalid state` 并掩盖真实原因；现在错误路径只 `error()`。
+- **`fetch(request)` 形态被改成 GET**：宿主直接交一个 `Request` 时，改写后的请求会落到
+  fetch 的默认方法 GET 上，而带 body 的 GET 会被拒；现在方法与 abort signal 都从该
+  Request 上读取。
+- **未知模型每个请求都重读目录**：懒读目录原先以「这个模型不在表里」为条件，于是已下架
+  或回退表里的模型会让每一次对话都多一次目录请求；改为「本次实例还没成功读过」。
+- **昵称不再被 latin-1 回转改坏**：实测该回转修不回文档里的乱码形态，却会把正常名字
+  改坏（`🙂boy` → `=Bboy`、`Москва` → 控制字符、`José` → 替换字符，而这三者都恰好
+  通过了「可打印且无替换字符」的判据）。现在可打印的名字原样保留，只有空名字或带控制
+  字符时才用 `用户+uid末4位` 占位。
+
 ## [0.6.0] - 2026-10-16
 
 ### Fixed

@@ -1,13 +1,14 @@
 {
   "name": "opencode-cn-ai-auth",
-  "version": "0.6.0",
-  "description": "Magpie bundle and direct OpenCode entries for Loomy (讯飞) and Raccoon (商汤小浣熊) coding subscriptions",
+  "version": "0.7.0",
+  "description": "Magpie bundle and direct OpenCode entries for Loomy (讯飞), Raccoon (商汤小浣熊) and TRAE (字节跳动) coding subscriptions",
   "type": "module",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
     "./opencode/loomy": "./opencode/loomy.ts",
-    "./opencode/raccoon": "./opencode/raccoon.ts"
+    "./opencode/raccoon": "./opencode/raccoon.ts",
+    "./opencode/trae": "./opencode/trae.ts"
   },
   "files": [
     "index.ts",
@@ -29,7 +30,9 @@
     "iflytek",
     "raccoon",
     "sensenova",
-    "sensetime"
+    "sensetime",
+    "trae",
+    "bytedance"
   ],
   "license": "MIT",
   "engines": {

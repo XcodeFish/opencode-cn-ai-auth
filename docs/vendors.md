@@ -8,7 +8,8 @@
 | 来源 | 版本/时间 | 用途 |
 |---|---|---|
 | magpie 源码 | `host.js` / `provider/plugins.go`（0.1.1137 同代） | 宿主契约语义 |
-| JetHub | `dsh-codearts-auth` 0.4.2（commit `505d24f3`，MIT） | 两家厂商的协议移植来源；其中的端点/常量已由其真机使用验证 |
+| JetHub | `dsh-codearts-auth` 0.4.2（commit `505d24f3`，MIT） | Loomy / Raccoon 两家的协议移植来源；其中的端点/常量已由其真机使用验证 |
+| JetHub（Trae） | `src/trae*.ts`（同仓库，MIT） | Trae 的协议移植来源；其上游是 `trae2api`（Go）与 `trae-mate`，JetHub 在真机上验证过这些通道 |
 | 厂商客户端读取 | 2026-09-26 / 2026-09-29 两次 | 模型表、倍率、图片支持、token 寿命 |
 | 本包实现 | `src/vendors/**` | 上述事实的落点 |
 
@@ -110,7 +111,7 @@ metadata。适配器在插件加载时注册回退模型、V2 integration 登录
 - **没有续期端点**：本包不实现 `auth.refresh`。业务端点上会话失效由
   `usage` / `provider.models` 钩子读到 `100002` 后返回 `signIn: "expired"` /
   抛 `SignInExpiredError`，宿主据此把账号标记为需重新登录。
-- 聊天端点（`/chat/completions`，标准 OpenAI 兼容、无信封）的失效形态见 §4 第 8 条：
+- 聊天端点（`/chat/completions`，标准 OpenAI 兼容、无信封）的失效形态见 §5 第 8 条：
   若厂商以 403 而非常见的 401 回答，宿主的聊天链路不会据此标记账号。
 - `expires` 是本包按 **14 天**（`LOOMY_SESSION_TTL_SECONDS = 1_209_600`）推算的，
   **不是服务返回的字段**；推算依据来自 JetHub 对该客户端会话寿命的观察。
@@ -210,12 +211,12 @@ checkin`、Settings › Daily check-in › Plugins 的自动开关，三者都�
   等于谎报每日额度。任务情况只写 `message`，`credit` 仍只算当日额度。
 - **`100002` 仍抛 `SignInExpiredError`**，让宿主标记账号需重新登录（和签到同一条规则）。
 
-**在卡片上看得见（`tasks.ts`）。** 签到返回的 `message` 宿主只在**失败**时显示：
-`usageOf` / CLI 的签到输出对 `claimed` / `done` 只拼 `credit` 与 `streak`，不拼
-`msg`（读自 magpie 0.1.1254 的 `plugin-host` 与界面字符串）。所以「一键领取」本身
-是看得见结果的，但只领到部分、或某次被拒，用户都无从知道。于是 `usage` 里另起一行
-读 `GET /onboarding/tasks`（只读），按账号缓存 10 分钟（`LOOMY_TASKS_TTL_MS`，
-usage 每次刷新都会走到这里），还有没领的就多一个 `aside: true` 的窗口：
+**在卡片上看得见，并顺手领掉（`tasks.ts`）。** 签到返回的 `message` 宿主只在
+**失败**时显示：`usageOf` / CLI 的签到输出对 `claimed` / `done` 只拼 `credit` 与
+`streak`，不拼 `msg`（读自 magpie 0.1.1254 的 `plugin-host` 与界面字符串）。于是
+`usage` 里另起一行读 `GET /onboarding/tasks`，按账号缓存 10 分钟
+（`LOOMY_TASKS_TTL_MS`，usage 每次刷新都会走到这里），还有没领的就多一个
+`aside: true` 的窗口：
 
 ```
 新手任务 2/8 · 已领 1500 / 还有 8500 分可领
@@ -223,6 +224,17 @@ usage 每次刷新都会走到这里），还有没领的就多一个 `aside: tr
 
 不带 `limit` / `amount`（否则卡片会画成"池子被花掉多少"的进度条），8/8 领完时
 这一行不出现。读失败只是一个 `undefined`，不影响额度卡片本身。
+
+**默认识别到未完成就自动领取。** 宿主自己画用量卡片，**不给插件任何可按的东西**：
+窗口是纯展示对象（`{name, used, display, …}`，没有 action/button 字段），而签到行
+的两个按钮（`自动签到` / `立即签到`）在账号「今日已签到」后就消失——也就是说
+「已签到 + 任务没领」这个组合在界面上没有入口。所以本包把领取放在**必然会跑到的**
+`usage` 上：读到还有未完成就顺手领掉，同一次刷新的卡片读数直接变成 8/8、那一行随之
+消失。用户不需要点任何东西，这也是「按钮」在这里唯一可能的等价物。
+
+- 只在**读到有未完成**时才尝试；读数 10 分钟缓存一次，所以最多 10 分钟一次尝试。
+- 领取是幂等的（已领完的账号 0 个请求）；被拒时停下、记下已领的部分，等读数过期再试。
+- `options.claimTasks: false` 关掉它，让 `usage` 回到严格只读。默认开启。
 
 ### 已知限制
 
@@ -329,12 +341,169 @@ usage 每次刷新都会走到这里），还有没领的就多一个 `aside: tr
 返回同一份字节。网址是厂商自己发布 mark 的地方，本包不复制品牌资源；失效时宿主
 回落到插件市场的图标。规则与取舍见 `architecture.md` §4.7。
 
-## 4. 未验证边界（发布前需知）
+## 4. TRAE（字节跳动）
+
+`provider id = trae`，显示名 `TRAE (字节)`。**第一版只做国内版客户端**：JetHub 另有一个
+国际版（`trae-intl`，域名与 client_id 都不同），本包暂不接入，理由见 §5 未验证边界。
+
+这一家与另两家的根本区别：**Trae 不是 OpenAI 兼容通道**。Loomy / Raccoon 只需注入请求头
+（Raccoon 再加一个 `extra_body` 字段），协议转换由宿主完成；Trae 的请求体与流式响应都要
+本包改写。因此它有另两家没有的模块（`api.ts` 的 wire 解析、`wire.ts` 的双向改写），也有
+另两家没有的两类约束：**请求体必须转换**、**响应流必须转换**。
+
+### 端点与协议
+
+| 用途 | 方法 | 路径 | Host | 认证 |
+|---|---|---|---|---|
+| 对话 | POST | `/api/agent/v3/llm_utils_chat` | `trae-api-cn.mchost.guru` | `Cloud-IDE-JWT` |
+| 模型目录（单通道） | POST | `/api/ide/v1/get_detail_param` | 同上 | 同上 |
+| 模型目录（**多通道**） | POST | `/api/ide/v1/batch_get_detail_param` | 同上 | 同上 |
+| 换 token | POST | `/cloudide/api/v3/trae/oauth/ExchangeToken` | `api.trae.com.cn` | 用 refreshToken |
+| 用户信息 | POST | `/cloudide/api/v3/trae/GetUserInfo` | 同上 | `Cloud-IDE-JWT` |
+| 签到状态 | POST | `/trae/api/v2/ug/checkin_credits/status` | `api.trae.cn` | `Cloud-IDE-JWT` |
+| 签到领取 | POST | `/trae/api/v2/ug/checkin_credits/claim` | 同上 | 同上 |
+| 积分余额 | POST | `/trae/api/v2/pay/ide_user_ent_usage` | 同上 | 同上 |
+
+出处：JetHub `src/trae.ts` / `src/trae-product.ts`（0.4.2，MIT），其协议转引自 `trae2api`（Go）
+与 `trae-mate`；`docs/conventions.md` §6 的「每个端点只在 `product.ts` 写一次」在本包由
+`TRAE_PATHS` 承载。
+
+### 三条实测结论（写反了不会报错）
+
+1. **`function` 是通道，不是装饰**。同一个模型只在列出它的通道里可调用，发错通道会在
+   **流内**回 `4001 param is invalid`（JetHub 2026-09-19 逐模型 × 逐通道实测）。因此
+   `provider.models` 把每个模型来自哪个通道记在 `catalog` 里，聊天请求再按模型回放
+   （`wire.ts` 的 `function` 字段）。缺省通道 `solo_work_lite` 只是兜底。
+2. **请求体必须转换，不能透传**。`stream` 强制 true；`model` 与 `config_name` 双写；
+   字符串 `content` 变 `[{type:"text"}]`；assistant 的 `tool_calls[].function` 改名
+   `function_call`；**`tools[].function.parameters` 必须序列化成 JSON 字符串**（上游要求
+   string，OpenAI 要求 object）。最后一条尤其隐蔽：写在转换之后赋值不会生效，参数会以
+   object 形态发出并被拒。
+3. **响应是 SOLO 私有 SSE，不是 OpenAI chunk**。事件名 `output` / `token_usage` /
+   `done` / `error`（另有 `metadata` / `timing_cost` / `extra_info`，本包不消费）；正文在
+   `output.response`、思考在 `output.reasoning_content`；工具调用内层同样用 `function_call`
+   且带 `namespace` / `partial_arguments`，必须清掉。解析要兼容 `data:{...}`（无空格）。
+
+### 登录
+
+浏览器授权 + **本机回环回调**（`src/vendors/trae/login.ts`）。插件先起一个一次性本地页
+（`core/local-page.ts`，绑 `127.0.0.1:0`，URL 带随机前缀），把回调地址作为
+`auth_callback_url` 参数发给 `www.trae.cn/authorization`，用户在浏览器完成授权后浏览器被
+重定向回本地页，插件在那一跳里换凭据。
+
+三个曾经让流程「卡在授权中」的点，都是参数或形态写错：
+
+- 回调参数名是 **`auth_callback_url`**；`callback_url` / `redirect_uri` 会被忽略。
+- 回调**直接回传 token**（`refreshToken` + `userInfo` / `userJwt` 两个 URL 编码 JSON），
+  不是 OAuth 的 `?code=`。
+- 授权页还有一条 **PKCE** 分支会回 `code` / `authCodeInfo`。本包不实现该流程，但会
+  **如实说明是流程暂不支持**，而不是把它报成「缺凭据」——否则用户会去修错的地方。
+
+用户昵称在回调里会经 latin-1 误解一次（中文变乱码）。JetHub 的修法是把这个字符串当
+latin-1 再解一次 UTF-8；**本包不做这一步**，因为 2026-10-16 实测这一步两头都不成立：
+它修不回文档里那个乱码形态（`Óû§8847309959` 解出的是替换字符），却会把本来正常
+的名字改坏（`🙂boy` → `=Bboy`、`Москва` → 控制字符、`José` → 替换字符），而这三种
+结果都恰好通过了「可打印且无替换字符」这个本该表示「修好了」的判据。因此本包的规则是：
+**能打印就原样保留厂商给的名字**，只有空名字或带控制字符时才换成可读占位
+（`用户+uid末4位`）。概率上更常见的是后者（回调偶尔给出空昵称）。
+
+### 设备身份（本家最特殊的一处）
+
+登录态里带两个 **32 位 hex** 的设备指纹：
+
+| 字段 | 作用 | 生成时机 |
+|---|---|---|
+| `machineId` | 上游据它标识设备；换值可能触发重新登录 | 登录时生成，此后**永不重生成** |
+| `deviceId` | 签到按**设备**每日一次；同机两账号共用会被「该设备已签到」拦 | 登录时生成，此后**永不重生成** |
+
+续期（`ExchangeToken` 会**轮换 refresh token**）必须把这两个字段原样带回，否则一次续期就
+把账号变成「新机器」或让签到额度翻倍。本包在 `api.ts` 的 `applyRefresh` 里显式保留，
+并由 `tests/trae.api.test.ts` 钉住。
+
+签到请求本身用的是**另一套派生身份**（不是上面的 `deviceId`）：基于 `uid` 做 SHA-256
+确定性派生的 15 位数字 + UUID v4 + 64 hex session id（`api.ts` 的 `seededStream`）。好处是
+每个账号天然独立、且插件不需要为签到持久化任何东西。JetHub 把 9074 的自动换设备重试
+撤掉了（理由：那等于把「本设备今天已签」伪装成成功），本包沿用。
+
+### 会话与续期
+
+有续期端点，且是**轮转型**：`auth.refresh` 把新的 `access` / `refresh` / `expires` 一起写回
+（`refresh_token` 缺省时保留旧值——服务在某些代理后面会省略它，保留旧值才能让账号继续可续期），
+同时带回 `machineId` / `deviceId` / `uid`。`refreshLead` 为 5 分钟。
+
+### 模型目录
+
+`batch_get_detail_param` 一次查多个通道，响应 `function_configs[]` 是**每个通道各自一套**
+目录。解析与合并规则（`api.ts` 的 `parseBatchCatalog`）：
+
+- 硬性过滤三条，与官方选择器一致：`usage !== "chat_completion"` 剔除、
+  `config_switch === false` 剔除、`is_invisible_to_user === true` 剔除。
+  ⚠️ `is_custom_model === true`（需自行绑供应商、必然 4001）也在实现里剔除；判据是
+  **标志的值，不是模型名**——JetHub 曾据一份过期名单误判，把后来已可用的模型当成该删的。
+- 同一模型出现在多个通道时取**信息更全**的一条：能声明推理档位的胜出；都能量则按
+  `TRAE_CHANNELS` 的顺序取更靠前者。JetHub 原本是「后面的覆盖前面的」，而上游恰好把最空的
+  条目排在最后，导致 13 个模型丢掉推理档位。
+- `context_window_tokens.dev` 是常规窗口，`max` 是 1M（需另开 Max 模式），只用 `dev`。
+- 倍率来自 `display_contact_config`——它是一个 **JSON 字符串**，不是对象；`rate: 0` 是
+  合法值（免费模型）。折扣只在真的降价时报（`discount_type !== "none"`、`before > after`、
+  未过期），否则 `before === after` 的 `off_peak` 会显示成「有活动」。
+
+推理档位直接用远端 `reasoning_effort_config.options` 的字符串（那是上游 wire 值），
+不做白名单转换。
+
+### 用量卡片与一键签到
+
+积分余额是**包**的形状：`user_entitlement_pack_list[]` 每项给 `quota.credits_limit`（授予）
+与 `usage.credits_amount`（已用），剩余即两者之差，总额是各包剩余之和。服务从不公布账号级
+上限，因此**每条窗口都是 `aside: true`**（只展示，不参与选号），并由签到状态再加一行
+「每日签到 今日可领 N 积分 / 已领取 / 未开放」。
+
+**一键签到**映射到宿主的唯一写钩子 `auth.checkin`：额度卡片的 `Check in now`、
+`magpie accounts checkin`、或 Settings › Daily check-in › Plugins 的自动签到，三处都会触发。
+流程与几处必须照做的事实：
+
+- 先查 `checkin_credits/status`：活动未开放 → `ineligible`；`checked_in: true` → `done`。
+  这一步让「今天已领」不产生任何写请求，自动签到重复触发也不会刷接口。
+- 否则发 `claim`（body `{}`）。**claim 响应不含积分数**——实测整份就是
+  `{"code":0,"message":"success"}`——所以成功后再查一次 status 取 `credits` 字段，
+  以免界面显示「签到成功 +0」。本包在 `credits.ts` 里就是这么做的。
+- 业务码 `9074`（当前使用人数太多）如实报失败并给重试提示，**不自动换设备重试**。
+- 业务码可能是字符串 `"9074"`（部分网关），只认数字会误判成成功；本包两种形态都读。
+- HTTP 401 报登录态失效。
+
+### OpenCode 侧
+
+Trae 也提供 OpenCode V2 子入口（`opencode/trae.ts`）。它与另两家在 OpenCode 上的形态
+不同：另两家只需注入请求头，Trae 需要**改写请求与响应**，因此用了适配器的
+`bridge`（`opencode/adapter.ts`），改写逻辑与 Magpie 侧共用
+`src/vendors/trae/wire.ts` 的同一份函数。
+
+这带来两个只能靠实测确认的前提（登记在 §5 第 16 条）：OpenCode 的
+`http.request` / `http.response` 两个 hook 必须允许插件**替换**被交过来的
+`Request` / `Response`；OAuth 凭据的 `metadata` 必须能往返保存，因为 Trae 的
+`uid` / `machineId` / `deviceId` 三个字段就放在那里。
+
+**签到只在 Magpie 侧**：OpenCode 不消费 `auth.checkin`，所以那边没有一键签到的入口。
+
+### 图标
+
+`TRAE_ICON = https://lf-cdn.trae.com.cn/obj/trae-com-cn/trae_website_prod_cn/favicon.png`
+—— 2026-10-16 从 `https://www.trae.cn` 页面声明的 `<link rel="icon" href="…">` 读出。
+`HEAD` 回 `200 image/png`、`content-length: 488`，实测字节是 48x48 RGBA PNG（宿主上限
+1 MB，尺寸远在界内）。这是厂商在该域名下唯一发布的、可直接取回的 mark：
+`/favicon.ico` 回 204、`/logo.svg` 与 `/favicon.svg` 都回 HTML（SPA 兜底），CDN 上的
+`logo.png` 是 404。
+
+尺寸说明：48x48 在高分屏上会偏软，但它就是厂商自己声明的那一张。本包不复制品牌资源，
+也不自行放大或重绘；若日后厂商发布更大的 mark，换掉这一个常量即可。
+
+## 5. 未验证边界（发布前需知）
 
 以下内容在源码/客户端层面有据，但**没有在 magpie 内实测过**，不要当成已验证事实：
 
-1. 两家厂商的插件都未在 magpie 宿主内跑过真实登录与真实聊天；当前证据是
-   `plugin add` 级别的加载与形状检查（见 `developing.md` §3）。
+1. 三家厂商的插件都未在 magpie 宿主内跑过真实登录与真实聊天；当前证据是
+   `plugin add` 级别的加载与形状检查（见 `developing.md` §3）。Trae 的额外风险单列在
+   下方第 11–15 条。
 2. Raccoon 的思考开关端到端未抓包确认：`variants{none,high}` + `extra_body`
    改写逻辑自洽，但 agent 实际发出的 `reasoning_effort` 终值未观测。
 3. Raccoon 短信登录依赖阿里云验证码 CDN 在宿主页面环境中的可用性；扫码路径不依赖。
@@ -370,6 +539,40 @@ usage 每次刷新都会走到这里），还有没领的就多一个 `aside: tr
     **未注册号码**：`sendMsgCode` 对任意合法号码都回 `000000`（不发短信也回），
     所以「新号码会直接开通账号」这件事没有证据。上线前应拿一个从未登录过 Loomy 的
     号码验一次；若服务其实要求先注册，需要在文档与登录页文案里写明。
+
+
+11. **Trae 未在 magpie 内跑过真实登录、真实聊天与真实签到**。当前证据是三件事：
+   (a) 协议事实来自 JetHub 的 Trae 实现，而 JetHub 自己在真机上验证过这些通道；
+   (b) 本包的转换与解析规则由离线测试逐条锁住（`tests/trae.*.test.ts`，含请求体改写、
+   SSE 转换、目录合并、签到状态机、回调解析、续期保留设备身份）；
+   (c) 插件能通过 `bun run check` 的入口形状与依赖方向门禁。**未做**的是把一次真实
+   对话、一次真实签到跑通并比对上游返回值。
+12. **Magpie 是否原样消费 loader.fetch 返回的合成 Response（含流式）没有实测**。
+   Trae 的整个方案建立在这一点上：`bridgeResponse` 用 `ReadableStream` 现造一个
+   `text/event-stream` 响应交回宿主。本包的另两家厂商只改请求体、不改响应，所以这一点
+   此前从未被触及。第一次真实聊天前，建议先用一个「返回手写 OpenAI SSE 的 loader.fetch」
+   做最小探针；若宿主在这条链路上做了自己的缓冲或校验，需要改成聚合形态（`streamed: false`
+   路径已经实现）或另寻通道。
+13. **Trae 的 18080 回调端口在本包里没有被使用**：本包用 `127.0.0.1:0` + 随机前缀
+   （`core/local-page.ts` 的既有形状），回调地址随登录 URL 一起发出，所以端口不必固定。
+   JetHub 首选 18080 并在被占用时回退随机端口，两者的差别只在于「厂商白名单是否要求固定
+   端口」——本包认为不要求（因为回调是插件自己构造并下发的），但**没有真机验证过**。
+   若真实登录发现授权页只接受 18080，需要在 `login.ts` 里换成首选端口 + 回退的写法。
+14. **Trae 国际版（`trae-intl`）未接入**。JetHub 有完整实现（域名
+   `api5-normal-alisg.mchost.guru` / `api.trae.ai`、独立 client_id、独立 provider id），
+   但它的签到实现在 JetHub 里把 host 硬编码成 `api.trae.cn`，国际版是否真有签到、
+   走哪个域名，**没有证据**。本包因此只在源码层保留「一家厂商一套 product 事实」的结构，
+   等能真机核对时再加第二套 `product`。
+15. **Trae 协议是逆向私有接口**，与账号封控和厂商 ToS 风险绑定。本包按「不静默执行有
+   副作用的动作」的既有原则，只把签到挂在用户能按的钩子上；但用户仍应知悉这条通道不是
+   厂商公开 API。README 的能力表与本节是这件事对外说明的地方。
+16. **Trae 的 OpenCode 入口未在真实 OpenCode 里验证**。它依赖两件按 SDK 类型推断、
+   未经实测的事：(a) `session.hook("http.request")` 与 `session.hook("http.response")`
+   允许插件替换事件里的 `Request` / `Response`（骨架代码 `opencode/adapter.ts` 直接
+   给 `event.request` / `event.response` 赋值）；(b) OAuth 凭据的 `metadata` 能往返
+   保存 `uid` / `machineId` / `deviceId`。若 (a) 不成立，Trae 在 OpenCode 上无法工作，
+   需要改用本地回环 shim（JetHub 与 `dsh-connect-trae` 用的就是那种架构）；若 (b) 不
+   成立，这四个字段要改从插件 options / 环境变量读。
 
 发现与上述不符的现象时：先改 `src/vendors/<id>/product.ts` 的常量与本文档，
 再补一条回归测试；不要只改实现不留证据。

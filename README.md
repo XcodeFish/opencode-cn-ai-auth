@@ -1,13 +1,20 @@
 # opencode-cn-ai-auth
 
-给 Magpie 与 OpenCode 的中国区 AI 编程订阅 provider 插件：Loomy（讯飞）与
-Raccoon（商汤小浣熊），共享同一套协议实现。Magpie 使用一个包承载两个 provider，
-OpenCode 使用每家厂商一个显式入口：
+给 Magpie 与 OpenCode 的中国区 AI 编程订阅 provider 插件：Loomy（讯飞）、
+Raccoon（商汤小浣熊）与 TRAE（字节跳动），共享同一套协议实现。Magpie 使用一个包
+承载多个 provider，OpenCode 使用每家厂商一个显式入口：
 
 | provider id | 厂商 | 模型数（回退表） | Magpie 登录方式 |
 |---|---|---|---|
 | `loomy` | Loomy（讯飞） | 8 | 微信扫码 / 短信验证码 |
 | `raccoon` | Raccoon（商汤小浣熊） | 6 | 微信扫码 / 短信验证码 |
+| `trae` | TRAE（字节跳动） | 17 | 浏览器授权（本机回环回调） |
+
+TRAE 与另两家有一处根本差别：**它不是 OpenAI 兼容通道**。请求体要转成 SOLO 格式，
+响应要从 SOLO 私有 SSE 转回 OpenAI chunk，两件事都由本包在 `loader.fetch` 里做
+（`src/vendors/trae/wire.ts`）。它也有另两家没有的约束：模型只能在「列出它的通道」里
+调用、登录态里带两个不可重生的设备指纹。事实与出处见
+[`docs/vendors.md`](docs/vendors.md) §4。
 
 包名 `opencode-cn-ai-auth`（本地开发 / 独立仓库）；将来贡献进 magpie-community
 时用 `@magpie-community/opencode-cn-ai-auth`，目录 `packages/cn-ai`。
@@ -20,7 +27,7 @@ OpenCode 使用每家厂商一个显式入口：
 
 ```sh
 magpie plugin add <包的路径或名字>
-magpie plugin login loomy    # 或 raccoon
+magpie plugin login loomy    # 或 raccoon / trae
 magpie plugin --json         # 看加载状态
 ```
 
@@ -41,18 +48,47 @@ OpenCode V2 按厂商加载一个子入口；每个子入口导出标准的 `{ i
 ```
 
 Raccoon 使用 `opencode-cn-ai-auth/opencode/raccoon`，并把 token 放进
-`RACCOON_ACCESS_TOKEN` 或插件 `options.accessToken`。也可以把两个条目同时放入
+`RACCOON_ACCESS_TOKEN` 或插件 `options.accessToken`。也可以把多个条目同时放入
 `plugins`。适配器会注册回退模型目录、V2 integration 登录方式，并在请求中注入
 token；二维码/短信登录会在 OpenCode 的本地登录页完成，凭据由 OpenCode 保存，
 不会迁移 Magpie 的账号 metadata。Raccoon 组织账号请在插件 options 中提供
 `officeIdentity`。Magpie 的完整额度卡片和签到能力只在 Magpie host 中生效；Raccoon
 的自动续期只对返回 refresh token 的登录生效。
 
+TRAE 使用 `opencode-cn-ai-auth/opencode/trae`：
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "opencode-cn-ai-auth/opencode/trae",
+      "options": {
+        "accessToken": "<trae-access-token>",
+        "uid": "<trae-user-id>",
+        "machineId": "<32 位 hex>",
+        "deviceId": "<32 位 hex>"
+      }
+    }
+  ]
+}
+```
+
+Trae 在 OpenCode 上与另两家不同：它不是 OpenAI 兼容通道，所以适配器不只用请求头，
+而是**改写请求与响应**（复用 `src/vendors/trae/wire.ts` 的同一份改写）。因此它需要
+OpenCode 提供 `http.request` / `http.response` 两个 hook，且两者都要允许插件**替换**
+被交过来的对象。四个字段都必须提供：Trae 的请求头带设备指纹，缺了上游会拒绝。
+浏览器登录也注册为 V2 integration 方式，登录结果里的 `uid` / `machineId` /
+`deviceId` 会随凭据的 `metadata` 保存。
+
+⚠️ 这一条**尚未在真实 OpenCode 里验证**（见 `docs/vendors.md` §5 第 16 条）：hook
+能否替换对象、`metadata` 能否往返，都只是按 SDK 类型推断的。
+
 兼容矩阵：OpenCode V2 的 `plugins` 配置和 `setup(ctx)` 入口；OpenCode V1 的
 `plugin` 配置及函数/`server` 入口不支持，需升级宿主或改用包根的 Magpie 入口。
 
-Magpie 仍然从包根入口 `index.ts` 加载两个插件工厂；根入口和两个 OpenCode 子入口
-都会随 npm 包发布。
+Magpie 仍然从包根入口 `index.ts` 加载各厂商的插件工厂；根入口和三个 OpenCode 子入口
+（`loomy` / `raccoon` / `trae`）都会随 npm 包发布。**签到仍只在 Magpie 侧**：OpenCode
+不消费 `auth.checkin`，所以那边没有一键签到的入口。
 
 ## 登录
 
@@ -101,21 +137,22 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
 
 ## 能力对照
 
-| 能力 | Loomy | Raccoon |
-| --- | --- | --- |
-| 模型目录 | 账号级 `GET /models`，倍率写在展示名里，插件把它解析成 `rate` 徽标；读不到时回退内置 8 个模型并标记为回退 | 账号级 `GET /model_catalog`，取 `type === "chat"` 且非 `visible: false`；倍率来自 `billing_multiplier` / `billing_effective_multiplier`，回退内置 6 个模型 |
-| 思考档位 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） |
-| 用量卡片 | 三行：今日积分（参与选号）+ 永久积分（`aside`）+ 新手任务进度（`aside`，8/8 领完时不显示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） |
-| 锁定永久积分 | `options.lockPermanent: true` 时，今日额度用完即拒绝请求（429，宿主把账号 bench 到窗口重置），不再悄悄花永久积分 | — |
-| 每日签到 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 |
-- **新手任务（Loomy）**：宿主没有一次性奖励钩子，本包把它挂在唯一的写钩子 `auth.checkin`
-  上——点额度卡片的 `Check in now`、跑 `magpie accounts checkin`、或在 Settings ›
-  Daily check-in › Plugins 打开自动签到，都会顺手把没领的任务领掉。任务分不计入
-  `credit`（那是「今日额度」）。由于宿主的 CLI 与卡片只在签到**失败**时显示插件返回的
-  消息，进度另在用量卡片上占一行（`新手任务 2/8 · 已领 1500 / 还有 8500 分可领`，
-  `aside`、8/8 领完不显示）。详见 [`docs/vendors.md`](docs/vendors.md) §2。
-| 续期 | 没有 refresh 端点：会话 14 天，按本地时间记 `expires`，到期需重新登录 | 有：`POST /refresh` 轮换 `access_token`（`refresh_token` 缺省时保留旧值），提前 5 分钟刷新 |
-| 图片输入 | 按 `/models` 的输入模态 | 按目录 `tags` + 两个实测能读图但未标 vision 的模型白名单 |
+| 能力 | Loomy | Raccoon | TRAE（字节） |
+| --- | --- | --- | --- |
+| 模型目录 | 账号级 `GET /models`，倍率写在展示名里，插件把它解析成 `rate` 徽标；读不到时回退内置 8 个模型并标记为回退 | 账号级 `GET /model_catalog`，取 `type === "chat"` 且非 `visible: false`；倍率来自 `billing_multiplier` / `billing_effective_multiplier`，回退内置 6 个模型 | 账号级 `POST /api/ide/v1/batch_get_detail_param`，一次查多个**通道**并合并成一份目录；每条模型记住来自哪个通道（发错通道会流内回 `4001`）；读不到时回退内置 17 个模型 |
+| 思考档位 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） | 远端 `reasoning_effort_config.options` 的字符串原样作为档位（`light` / `high` / `extra_high` …）；它们是上游 wire 值，不做白名单转换 |
+| 用量卡片 | 三行：今日积分（参与选号）+ 永久积分（`aside`）+ 新手任务进度（`aside`，8/8 领完时不显示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） | `POST /pay/ide_user_ent_usage` 的**积分包**列表，剩余 = Σ(授予 − 已用)，另加一行签到状态；服务从不公布账号级上限，全部 `aside` |
+| 锁定永久积分 | `options.lockPermanent: true` 时，今日额度用完即拒绝请求（429，宿主把账号 bench 到窗口重置），不再悄悄花永久积分 | — | — |
+| 每日签到 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 | 有：先查 `checkin_credits/status`（已领就不发写请求），再 `checkin_credits/claim`；claim 响应不含积分数，成功后再查一次 status 取实际所得。签到按**设备**每日一次，`9074` 如实报失败、不换设备重试 |
+- **新手任务（Loomy）**：宿主没有一次性奖励钩子，也不给插件任何按钮，所以本包把领取
+  挂在两处：`auth.checkin`（`Check in now` / `magpie accounts checkin` / 每日自动签到
+  都会顺手领），以及 `auth.usage`——**卡片读到还有未完成就自动领掉**，用户不用点任何
+  东西；`options.claimTasks: false` 可关掉后者、让额度读取保持只读。任务分不计入
+  `credit`（那是「今日额度」）。进度在用量卡片上另占一行
+  （`新手任务 2/8 · 已领 1500 / 还有 8500 分可领`，`aside`、8/8 领完不显示）。
+  详见 [`docs/vendors.md`](docs/vendors.md) §2。
+| 续期 | 没有 refresh 端点：会话 14 天，按本地时间记 `expires`，到期需重新登录 | 有：`POST /refresh` 轮换 `access_token`（`refresh_token` 缺省时保留旧值），提前 5 分钟刷新 | 有：`ExchangeToken` **同时轮换两个 token**，续期时把新值写回、并保留设备指纹；提前 5 分钟刷新 |
+| 图片输入 | 按 `/models` 的输入模态 | 按目录 `tags` + 两个实测能读图但未标 vision 的模型白名单 | 按远端 `display_config.multimodal`；缺失一律当不支持（宁可不发） |
 
 ## 架构设计
 
@@ -125,7 +162,7 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
 
 ### 为什么是 provider 插件，不是 middleware
 
-两家厂商的核心能力——登录取凭据、按账号续期、按账号拉模型表、读积分额度、
+各厂商的核心能力——登录取凭据、按账号续期、按账号拉模型表、读积分额度、
 每日签到——都需要网络、跨请求状态与磁盘。middleware 跑在网关进程的受限执行环境里
 （只注入 `console`，请求钩子 250ms、无 `fetch`、无定时器、不能落盘），承载不了
 这些；它只适合跨供应商的请求/回复整形。magpie 还会重建聊天请求体，middleware
@@ -206,7 +243,7 @@ sequenceDiagram
 需要重新登录（`auth.checkin` 同理）。聊天链路上宿主只看 HTTP 状态（401 标记、
 2xx 清除）。**403 刻意不翻译成失效**：JetHub 的两次实测都显示 403 同时覆盖
 认证失败、额度、权限、安全策略与地域限制，按状态码一刀切会让用户白白重新登录
-（理由与出处见 `docs/vendors.md` §4 第 8 条）。
+（理由与出处见 `docs/vendors.md` §5 第 8 条）。
 
 ### 目录职责
 
@@ -215,6 +252,7 @@ index.ts                 入口：只导出插件工厂，不导出工具函数/
 src/core/                基座：宿主契约 + 与厂商无关的能力
 src/vendors/loomy/       讯飞 Loomy
 src/vendors/raccoon/     商汤小浣熊
+src/vendors/trae/        TRAE（字节跳动）
 tests/                   离线测试（假 fetcher 驱动，不发真实请求）
 docs/                    架构、规范、开发步骤、厂商事实
 scripts/check.ts         入口形状与依赖方向门禁
@@ -272,8 +310,8 @@ scripts/check.ts         入口形状与依赖方向门禁
   奖励因此不做，只在文档里说明去哪里领）。Loomy 的新手任务**有**落点——宿主的
   `auth.checkin` 是唯一写钩子、也是用户能手动按的那个，任务就随它走（见
   `docs/vendors.md` §2）。
-- **图标由厂商自己托管**：两个 provider 的 `auth.icon` 各自指向厂商自己页面声明的
-  logo（`product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON`），仓库里不放品牌资源。
+- **图标由厂商自己托管**：每个 provider 的 `auth.icon` 各自指向厂商自己页面声明的
+  logo（`product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON` / `TRAE_ICON`），仓库里不放品牌资源。
   宿主只接受 `https://` 图片网址或 `data:image/` URI，**裸图标名会被静默丢弃**
   ——这条已经做成门禁，写错直接红（见 [`docs/developing.md`](docs/developing.md) §4.1）。
 
@@ -347,9 +385,10 @@ bun run verify  # 改动完成前必须全绿
 
 - Raccoon 的「桌面端登录奖励」是三千里程碑式的一次性奖励，magpie 没有对应钩子（它既不是每日签到、也不该在后台偷偷代领），所以本包不实现；请到官方客户端领取。
 - Loomy 的「新手任务」10000 分随每日签到一起领（宿主的 `auth.checkin` 是唯一写钩子；任务领取是纯 API 直领，服务端不校验前置行为）。已领完的账号不产生额外请求。
-- 本包只做只读的额度读取；会写远端状态的调用只有三个：Loomy 的每日额度领取、Loomy 的新手任务补领（两者都在 `auth.checkin` 里）、Raccoon 的 token 续期。
+- 额度读取默认只读，例外是 Loomy 的新手任务：`auth.usage` 读到还有未完成时会把它们领掉（宿主的卡片不给插件按钮，这是唯一入口；`options.claimTasks: false` 可关掉）。会写远端状态的调用：Loomy 的每日额度领取与新手任务补领（`auth.checkin` + `auth.usage`）、TRAE 的每日签到领取，以及 Raccoon / TRAE 的 token 续期。
 - 短信登录依赖厂商自己的验证码链路（Raccoon 的阿里云滑块脚本来自其 CDN），离线或脚本被拦截时只有扫码可用。
-- 两家厂商都还没在 magpie 内跑过真实登录与真实聊天；当前证据是 `plugin add` 级别的加载与形状检查。逐条未验证边界登记在 `docs/vendors.md` §4。
+- TRAE 走的是逆向的私有接口，不是厂商公开 API；它的签到按**设备**每日一次（换账号不重置），失败时如实告知而不轮换设备重试。
+- 三家厂商都还没在 magpie 内跑过真实登录与真实聊天；当前证据是 `plugin add` 级别的加载与形状检查。逐条未验证边界登记在 `docs/vendors.md` §5（Trae 另有 §5 第 11–15 条）。
 
 ## 提交 Issue
 

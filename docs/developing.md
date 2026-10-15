@@ -59,7 +59,7 @@ sb=$(mktemp -d)
 m() { env HOME="$sb" XDG_CONFIG_HOME="$sb/.config" XDG_CACHE_HOME="$sb/.cache" magpie "$@"; }
 
 m plugin add "$PWD"
-m plugin --json            # 应看到 loomy / raccoon 两个 provider，且无加载错误
+magpie plugin --json       # 应看到 loomy / raccoon / trae 三个 provider，且无加载错误
 ```
 
 进一步的交互（**会连真实厂商**，需要真实账号，按需执行）：
@@ -79,8 +79,9 @@ m plugin login raccoon
 1. `package.json` 版本 + `CHANGELOG.md`（保留"未验证/已知限制"章节）。
 2. `bun run verify` 全绿，`git status` 确认没有夹带无关改动。
 3. 独立仓库发布：确认 `package.json` 没有 `private: true` 后执行 `npm publish`。
-   发布包同时包含 Magpie 根入口与 `opencode/loomy`、`opencode/raccoon` 两个 OpenCode
-   V2 子入口（各自导出 `{ id, setup }`）；V1 的函数/`server` loader 不在支持矩阵内。
+   发布包同时包含 Magpie 根入口与 `opencode/loomy`、`opencode/raccoon`、`opencode/trae`
+   三个 OpenCode V2 子入口（各自导出 `{ id, setup }`）；V1 的函数/`server` loader 不在
+   支持矩阵内。
 4. 进社区仓库（`magpie-community/plugins`）：
    - 目录 `packages/cn-ai/`，`package.json` 的 `name` 改为
      `@magpie-community/opencode-cn-ai-auth`；
@@ -102,7 +103,7 @@ m plugin login raccoon
 
 | 用途 | 字段 | 宿主接受什么 | 本包的值 |
 |---|---|---|---|
-| provider 行、账号、额度卡片 | `auth.icon`（`defineVendor` 的 `icon`） | **只有** `https://` 的图片网址或 `data:image/` URI；**裸图标名会被丢弃** | 各厂商**自己**页面声明的 logo（`product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON`），两个 provider 各不相同 |
+| provider 行、账号、额度卡片 | `auth.icon`（`defineVendor` 的 `icon`） | **只有** `https://` 的图片网址或 `data:image/` URI；**裸图标名会被丢弃** | 各厂商**自己**页面声明的 logo（`product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON` / `TRAE_ICON`），每个 provider 各不相同 |
 | 插件市场卡片、插件行 | `registry.json` 的 `icon` | 社区内置图标名（`internal/gui/assets/icons/<name>.svg`） | 见下面那条选择 |
 
 出处：宿主 `internal/plugin/host.js` 的 `iconOf`（只保留 `https://` 与 `data:image/`）、
@@ -123,7 +124,7 @@ m plugin login raccoon
 问题），图片换了也跟着换；失效时宿主回落到市场图标，代价只是一个图标。
 
 **市场卡片那条 `icon` 是唯一要人做取舍的地方**：一个包只有一个 `icon`，而本包有
-两家厂商，所以它只能代表一家。当前取 `spark-color`（讯飞星火，本包第一个
+多家厂商，所以它只能代表一家。当前取 `spark-color`（讯飞星火，本包第一个
 provider 的母公司）；换成 `sensenova-color` 或干脆不写（宿主画通用标记）
 都不影响功能，改的是观感。
 
