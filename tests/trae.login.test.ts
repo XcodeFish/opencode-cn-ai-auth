@@ -8,7 +8,10 @@
 import { describe, expect, test } from "bun:test"
 import {
   buildLoginUrl,
+  challengeOf,
+  completeSignIn,
   fixNickname,
+  newPkce,
   parseCallback,
   refreshCredential,
   traceIdOf,
@@ -17,10 +20,11 @@ import { cannedFetch, jsonOk } from "./helpers.ts"
 
 const MACHINE = "a".repeat(32)
 const DEVICE = "b".repeat(32)
+const PKCE = { codeVerifier: "v".repeat(43), codeChallenge: "c".repeat(43) }
 
 describe("登录 URL", () => {
   test("回调参数是 auth_callback_url，并带齐通道与客户端伪装参数", () => {
-    const url = new URL(buildLoginUrl(MACHINE, DEVICE, "http://127.0.0.1:18080/authorize"))
+    const url = new URL(buildLoginUrl(MACHINE, DEVICE, "http://127.0.0.1:18080/authorize", PKCE))
     expect(url.origin + url.pathname).toBe("https://www.trae.cn/authorization")
     const params = url.searchParams
     expect(params.get("auth_callback_url")).toBe("http://127.0.0.1:18080/authorize")
@@ -33,6 +37,23 @@ describe("登录 URL", () => {
     expect(params.get("machine_id")).toBe(MACHINE)
     expect(params.get("device_id")).toBe(DEVICE)
     expect(params.get("login_trace_id")).toBe(traceIdOf(MACHINE, DEVICE))
+    // 当前客户端用 PKCE：少了这一对，控制台会走它已经不再签发令牌的老流程
+    // （用户看到的「登录失败 / 网络错误」就是这个）。
+    expect(params.get("code_challenge")).toBe(PKCE.codeChallenge)
+    expect(params.get("code_challenge_method")).toBe("S256")
+    // 版本号取自厂商自己的客户端 bundle，不是旧构建的值。
+    expect(params.get("plugin_version")).toBe("2.3.91092")
+    expect(params.get("x_app_version")).toBe("3.4.2")
+  })
+
+  test("PKCE 校验串符合 RFC 7636 的 S256 形状", () => {
+    const pkce = newPkce()
+    expect(pkce.codeVerifier.length).toBeGreaterThanOrEqual(43)
+    expect(pkce.codeVerifier).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(pkce.codeChallenge).toBe(challengeOf(pkce.codeVerifier))
+    expect(pkce.codeChallenge).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    // 每次都不一样。
+    expect(newPkce().codeVerifier).not.toBe(pkce.codeVerifier)
   })
 })
 
@@ -68,12 +89,58 @@ describe("回调解析", () => {
     expect(parsed.callback.refreshToken).toBe("")
   })
 
-  test("带 PKCE code 的回调如实说是流程不支持，而不是报「缺凭据」", () => {
+  test("PKCE 回调给出 authCodeInfo.AuthCode，且带着用户信息", () => {
+    const userInfo = encodeURIComponent(JSON.stringify({ UserID: "u-1", ScreenName: "张三" }))
+    const authCodeInfo = encodeURIComponent(JSON.stringify({ AuthCode: "ac-123" }))
+    const parsed = parseCallback(`/authorize?authCodeInfo=${authCodeInfo}&userInfo=${userInfo}`)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.callback.authCode).toBe("ac-123")
+    expect(parsed.callback.refreshToken).toBe("")
+    expect(parsed.callback.uid).toBe("u-1")
+  })
+
+  test("裸 code 参数也认", () => {
     const parsed = parseCallback("/authorize?code=abc123")
-    expect(parsed.ok).toBe(false)
-    if (parsed.ok) return
-    expect(parsed.authCodeFlow).toBe(true)
-    expect(parsed.reason).toContain("PKCE")
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.callback.authCode).toBe("abc123")
+  })
+
+  test("带授权码但没有 PKCE 校验串时明确报错，而不是静默失败", async () => {
+    const fetcher = cannedFetch([])
+    await expect(
+      completeSignIn(
+        { refreshToken: "", accessToken: "", authCode: "ac-1", uid: "u", nickname: "n", enterpriseId: "" },
+        { machineId: MACHINE, deviceId: DEVICE },
+        { client: { auth: { set: async () => undefined } }, fetcher },
+      ),
+    ).rejects.toThrow(/PKCE/)
+    expect(fetcher.calls).toHaveLength(0)
+  })
+
+  test("授权码用当前客户端的 PKCE 端点换取令牌，并带上校验串", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/trae/api/v3/oauth/ExchangeToken",
+        respond: () => jsonOk({ Result: { Token: "at", RefreshToken: "rt", TokenExpireDuration: 3600 } }),
+      },
+    ])
+    const credential = await completeSignIn(
+      { refreshToken: "", accessToken: "", authCode: "ac-1", uid: "u-1", nickname: "张三", enterpriseId: "" },
+      { machineId: MACHINE, deviceId: DEVICE },
+      { client: { auth: { set: async () => undefined } }, fetcher, now: () => 1000 },
+      PKCE,
+    )
+    expect(credential.accessToken).toBe("at")
+    expect(credential.refreshToken).toBe("rt")
+    expect(credential.machineId).toBe(MACHINE)
+    const exchange = fetcher.callsMatching("/trae/api/v3/oauth/ExchangeToken").at(0)
+    const body = JSON.parse(String(exchange?.init?.body)) as Record<string, unknown>
+    expect(body.AuthCode).toBe("ac-1")
+    expect(body.CodeVerifier).toBe(PKCE.codeVerifier)
+    expect(body.ClientID).toBe("en1oxy7wnw8j9n")
+    expect(body.IDEVersion).toBe("3.4.2")
   })
 
   test("什么都没有的回调报缺凭据", () => {

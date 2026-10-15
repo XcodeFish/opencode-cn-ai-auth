@@ -2,6 +2,23 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.7.1] - 2026-10-16
+
+### Fixed
+
+- **Trae 的浏览器登录改用 PKCE，修掉「点登录就显示登录失败 / 网络错误」**。用户报障的
+  那一屏是**控制台自己页面**的状态：无头 Chrome 复现确认，控制台只有在
+  `GetRefreshToken` / `ExchangeToken` 成功之后才会跳转到本机回调页，出错时本机一个请求
+  都收不到。对照本机安装的官方客户端（Trae CN 1.107.1 的 `product.json`）后确认差异：
+  它用 `code_challenge` + `code_challenge_method=S256`，`plugin_version` 取
+  `tronBuildVersion`（`2.3.91092`），`x_app_version` 取 `appVersion`（`3.4.2`），并在
+  回调后用 `CodeVerifier` 到 `POST /trae/api/v3/oauth/ExchangeToken` 换令牌；本包此前
+  用的是 JetHub 时代那套没有 PKCE 的老参数（`plugin_version` 还是 `2.3.62834`），于是
+  控制台走了它已经不再签发令牌的老分支。现在按官方客户端构造 URL、回调里认
+  `authCodeInfo.AuthCode` 并带校验串换取；老的 refreshToken 回调仍作为兜底保留。
+- 回调里同时带着授权码与 token 时两条路都能走（优先用授权码），带授权码却没有校验串时
+  明确报错而不是静默失败。
+
 ## [0.7.0] - 2026-10-16
 
 ### Added

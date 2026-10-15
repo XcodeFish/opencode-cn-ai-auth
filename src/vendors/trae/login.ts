@@ -17,6 +17,7 @@
  * must not misreport.
  */
 
+import { createHash, randomBytes } from "node:crypto"
 import { errorMessage, VendorError } from "../../core/errors.ts"
 import { type Fetcher, httpJson } from "../../core/http.ts"
 import { asObject, str } from "../../core/json.ts"
@@ -37,6 +38,7 @@ import {
   type TraeExchange,
 } from "./api.ts"
 import {
+  TRAE_APP_VERSION,
   TRAE_CALLBACK_PATH,
   TRAE_CLIENT_ID,
   TRAE_CONSOLE_BASE,
@@ -72,6 +74,30 @@ function newDevice(): { machineId: string; deviceId: string } {
 }
 
 /**
+ * One PKCE pair: the verifier kept here, the challenge sent to the console.
+ *
+ * The current client signs in with PKCE (`code_challenge` +
+ * `code_challenge_method=S256`, measured from its bundle on 2026-10-16) and
+ * exchanges the returned authorization code together with this verifier.
+ * Without the pair the console falls back to a flow it no longer mints
+ * tokens for — which is what the "登录失败 / 网络错误" screen was.
+ */
+export interface TraePkce {
+  codeVerifier: string
+  codeChallenge: string
+}
+
+export function newPkce(): TraePkce {
+  const codeVerifier = randomBytes(32).toString("base64url")
+  return { codeVerifier, codeChallenge: challengeOf(codeVerifier) }
+}
+
+/** `BASE64URL(SHA256(ASCII(code_verifier)))`, as RFC 7636 defines S256. */
+export function challengeOf(codeVerifier: string): string {
+  return createHash("sha256").update(codeVerifier, "ascii").digest("base64url")
+}
+
+/**
  * The trace id that lets the console hand the answer back.
  *
  * The callback does not echo the device ids, so they cannot match a redirect
@@ -99,7 +125,12 @@ export function traceIdOf(machineId: string, deviceId: string): string {
  * The `x_*` parameters describe the client the console believes it is talking
  * to; leaving them out invites the risk control instead of the sign-in.
  */
-export function buildLoginUrl(machineId: string, deviceId: string, callbackUrl: string): string {
+export function buildLoginUrl(
+  machineId: string,
+  deviceId: string,
+  callbackUrl: string,
+  pkce: TraePkce,
+): string {
   const params = new URLSearchParams({
     login_version: "1",
     auth_from: "solo",
@@ -117,8 +148,12 @@ export function buildLoginUrl(machineId: string, deviceId: string, callbackUrl: 
     x_device_brand: "PC",
     x_device_type: "PC",
     x_os_version: "1.0",
-    x_app_version: TRAE_IDE_VERSION,
+    x_app_version: TRAE_APP_VERSION,
     x_app_type: "stable",
+    // The pair that makes the console hand back an authorization code instead
+    // of trying to mint a refresh token for a legacy client.
+    code_challenge: pkce.codeChallenge,
+    code_challenge_method: "S256",
   })
   return `${TRAE_CONSOLE_BASE}/authorization?${params.toString()}`
 }
@@ -128,6 +163,8 @@ export interface TraeCallback {
   refreshToken: string
   /** Only set when there was no refresh token; a short-lived fallback. */
   accessToken: string
+  /** The PKCE authorization code, when the console answered with one. */
+  authCode?: string
   uid: string
   nickname: string
   enterpriseId: string
@@ -170,27 +207,35 @@ export function parseCallback(rawUrl: string): TraeCallbackResult {
   const refreshToken = fromQuery.length > 0 ? fromQuery : jwtRefresh
   const accessToken = refreshToken.length > 0 ? "" : jsonText(userJwt, "Token")
 
+  // A code can arrive as the query's own `code`, as `authCode`, or inside an
+  // `authCodeInfo` that is either JSON or the bare code.
+  const authCodeInfo = parseJsonParam(query.get("authCodeInfo"))
+  const authCode =
+    authCodeInfo === undefined
+      ? undefined
+      : jsonText(authCodeInfo, "AuthCode") || jsonText(authCodeInfo, "authCode") || undefined
+  const bareCode = [query.get("code") ?? "", query.get("authCode") ?? ""]
+    .map((candidate) => candidate.trim())
+    .find((candidate) => candidate.length > 0)
+
   if (refreshToken.length === 0 && accessToken.length === 0) {
-    // A code can arrive as the query's own `code`, as `authCode`, or inside an
-    // `authCodeInfo` that is either JSON or the bare code.
-    const authCodeInfo = parseJsonParam(query.get("authCodeInfo"))
-    const authCode = [
-      query.get("code") ?? "",
-      query.get("authCode") ?? "",
-      jsonText(authCodeInfo, "code"),
-      jsonText(authCodeInfo, "authCode"),
-      query.get("authCodeInfo") ?? "",
-    ]
-      .map((candidate) => candidate.trim())
-      .find((candidate) => candidate.length > 0)
-    if (authCode !== undefined) {
-      return {
-        ok: false,
-        authCodeFlow: true,
-        reason: "上游返回了 PKCE 授权码，本插件尚未支持该流程，请稍后重试或更新插件",
-      }
+    const code = authCode ?? bareCode
+    if (code === undefined) {
+      return { ok: false, authCodeFlow: false, reason: "回调未携带登录凭据" }
     }
-    return { ok: false, authCodeFlow: false, reason: "回调未携带登录凭据" }
+    // A legal answer on the flow the current client uses: the code is
+    // exchanged together with the verifier this sign-in kept.
+    return {
+      ok: true,
+      callback: {
+        refreshToken: "",
+        accessToken: "",
+        authCode: code,
+        uid,
+        nickname: fixNickname(nickname, uid),
+        enterpriseId,
+      },
+    }
   }
 
   return {
@@ -198,6 +243,7 @@ export function parseCallback(rawUrl: string): TraeCallbackResult {
     callback: {
       refreshToken,
       accessToken,
+      ...(authCode === undefined ? {} : { authCode }),
       uid,
       nickname: fixNickname(nickname, uid),
       enterpriseId,
@@ -272,10 +318,16 @@ export async function completeSignIn(
   callback: TraeCallback,
   device: { machineId: string; deviceId: string },
   deps: TraeLoginDeps,
+  pkce?: TraePkce,
 ): Promise<TraeCredential> {
   const now = deps.now?.() ?? Date.now()
   let exchange: TraeExchange
-  if (callback.refreshToken.length > 0) {
+  if (callback.authCode !== undefined) {
+    if (pkce === undefined) {
+      throw new VendorError(TRAE_ID, "收到授权码但没有本次登录的 PKCE 校验串，请重新发起登录")
+    }
+    exchange = await exchangeByAuthCode(callback.authCode, pkce.codeVerifier, deps)
+  } else if (callback.refreshToken.length > 0) {
     exchange = await exchangeTokens(callback.refreshToken, deps)
   } else {
     exchange = {
@@ -315,6 +367,44 @@ export async function completeSignIn(
     throw new VendorError(TRAE_ID, "登录未能确定账号 ID，请重试")
   }
   return buildCredential(exchange, userInfo, device, now)
+}
+
+/**
+ * Trade the authorization code for tokens, with the PKCE verifier.
+ *
+ * This is the flow the current client uses: a different path from the legacy
+ * refresh-token exchange, and the verifier is what proves the same client
+ * that started the sign-in is finishing it. The body carries the client id,
+ * the code, the verifier and the app version; the vendor's client also sends
+ * a `DeviceInfo` block, which is not reproduced here — if the service turns
+ * out to require it, this call is where the failure will show up.
+ */
+async function exchangeByAuthCode(
+  authCode: string,
+  codeVerifier: string,
+  deps: TraeLoginDeps,
+): Promise<TraeExchange> {
+  const answer = await httpJson(deps.fetcher, `${TRAE_OAUTH_BASE}${TRAE_PATHS.exchangeByCode}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "User-Agent": TRAE_USER_AGENT,
+    },
+    body: JSON.stringify({
+      ClientID: TRAE_CLIENT_ID,
+      AuthCode: authCode,
+      CodeVerifier: codeVerifier,
+      IDEVersion: TRAE_APP_VERSION,
+    }),
+    timeoutMs: TRAE_REQUEST_TIMEOUT_MS,
+  })
+  if (!answer.ok) {
+    throw new VendorError(TRAE_ID, `授权码换取令牌失败（HTTP ${answer.status}）`, { status: answer.status })
+  }
+  const parsed = parseExchange(answer.json)
+  if (parsed === undefined) throw new VendorError(TRAE_ID, "授权码换取令牌的响应缺少 Token")
+  return parsed
 }
 
 /** One `ExchangeToken` call, shared by sign-in and renewal. */
@@ -418,6 +508,7 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
       label: "浏览器登录",
       async authorize() {
         const device = newDevice()
+        const pkce = newPkce()
         const log = vendorLogger(deps.client, TRAE_ID)
         const settlement = createSettlement<SignInResult>()
 
@@ -429,7 +520,7 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
               settlement.settle({ type: "failed", error: parsed.reason })
               return donePage(parsed.reason)
             }
-            const credential = await completeSignIn(parsed.callback, device, deps)
+            const credential = await completeSignIn(parsed.callback, device, deps, pkce)
             settlement.settle(signInResult(credential))
             return donePage("登录成功")
           } catch (error) {
@@ -449,7 +540,7 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
 
         const callbackUrl = new URL(TRAE_CALLBACK_PATH.replace(/^\//, ""), server.url).toString()
         return {
-          url: buildLoginUrl(device.machineId, device.deviceId, callbackUrl),
+          url: buildLoginUrl(device.machineId, device.deviceId, callbackUrl, pkce),
           instructions: "在浏览器中完成 TRAE 授权，页面会自动完成登录",
           method: "auto",
           callback: async () => {

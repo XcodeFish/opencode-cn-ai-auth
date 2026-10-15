@@ -67,8 +67,14 @@ export const TRAE_PATHS = {
   models: "/api/ide/v1/get_detail_param",
   /** Model catalog for several channels at once; the real client uses this. */
   batchModels: "/api/ide/v1/batch_get_detail_param",
-  /** refresh token → access token (rotating). */
+  /** refresh token → access token (rotating). The legacy flow. */
   exchange: "/cloudide/api/v3/trae/oauth/ExchangeToken",
+  /**
+   * authorization code + PKCE verifier → access token. This is the flow the
+   * current client uses (measured from its bundle, 2026-10-16), and it lives
+   * at a different path from the legacy one.
+   */
+  exchangeByCode: "/trae/api/v3/oauth/ExchangeToken",
   /** Account identity after the exchange. */
   userInfo: "/cloudide/api/v3/trae/GetUserInfo",
   /** Is today's check-in already taken? */
@@ -111,10 +117,23 @@ export const TRAE_CLIENT_ID = "en1oxy7wnw8j9n"
 export const TRAE_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
 export const TRAE_IDE_VERSION = "0.1.52"
 export const TRAE_IDE_VERSION_CODE = "20260811"
+
+/**
+ * The versions the **current** Trae CN client reports, read from its own
+ * bundle on 2026-10-16 (`/Applications/Trae CN.app`, `product.json`):
+ * `appVersion` 3.4.2 and `tronBuildVersion` 2.3.91092.
+ *
+ * They are sent as `x_app_version` and `plugin_version`. JetHub's values
+ * (`0.1.52` plugin version, `2.3.62834`) came from an older build and are the
+ * reason the console no longer recognises the sign-in this package used to
+ * start; the console itself only logs them, but the vendor's client is the
+ * only ground truth for what a client should look like.
+ */
+export const TRAE_APP_VERSION = "3.4.2"
 export const TRAE_DEVICE_BRAND = "Apple"
 export const TRAE_OS_VERSION = "macOS 15.7.4"
 export const TRAE_USER_AGENT = `Trae/${TRAE_IDE_VERSION}`
-export const TRAE_PLUGIN_VERSION = "2.3.62834"
+export const TRAE_PLUGIN_VERSION = "2.3.91092"
 
 /**
  * The client facts a request is stamped with, in the shape the header

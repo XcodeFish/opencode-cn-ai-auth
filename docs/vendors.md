@@ -394,10 +394,35 @@ checkin`、Settings › Daily check-in › Plugins 的自动开关，三者都�
 三个曾经让流程「卡在授权中」的点，都是参数或形态写错：
 
 - 回调参数名是 **`auth_callback_url`**；`callback_url` / `redirect_uri` 会被忽略。
-- 回调**直接回传 token**（`refreshToken` + `userInfo` / `userJwt` 两个 URL 编码 JSON），
-  不是 OAuth 的 `?code=`。
-- 授权页还有一条 **PKCE** 分支会回 `code` / `authCodeInfo`。本包不实现该流程，但会
-  **如实说明是流程暂不支持**，而不是把它报成「缺凭据」——否则用户会去修错的地方。
+- 回调可能**直接回传 token**（`refreshToken` + `userInfo` / `userJwt` 两个 URL 编码
+  JSON），也可能回一个**授权码**（`authCodeInfo.AuthCode`）——两条都要认，见下。
+- 回传授权码时，必须用**本次登录自己生成的 PKCE 校验串**去换取令牌。
+
+#### PKCE 是当前客户端唯一的通道（2026-10-16 定位）
+
+用户报障「点登录就显示登录失败 / 网络错误，请刷新页面重试」。这是**控制台自己的页面**
+给出的状态，不是本机回调页：把那串 URL 交给无头 Chrome 跑一遍可以确认控制台只会在
+`GetRefreshToken` / `ExchangeToken` 成功之后才 `window.location.href` 跳到我们的回调，
+所以那个错误发生时本机一个请求都没收到（探针实测：0 个请求）。
+
+对照本机安装的官方客户端（`/Applications/Trae CN.app`，1.107.1，`product.json`）后，
+差异是**它走 PKCE，而我们走的是老流程**：
+
+| 项 | 官方客户端 | 本包（修复前，抄自 JetHub） |
+|---|---|---|
+| 授权参数 | `code_challenge` + `code_challenge_method=S256` | **没有** |
+| `plugin_version` | `tronBuildVersion` = `2.3.91092` | `2.3.62834` |
+| `x_app_version` | `appVersion` = `3.4.2` | `0.1.52` |
+| `client_id` | `authConfig.SOLO.stable` = `en1oxy7wnw8j9n` | 同值（这一项没错） |
+| 换令牌 | `POST {host}/trae/api/v3/oauth/ExchangeToken`，体 `{ClientID, AuthCode, CodeVerifier, IDEVersion}` | 走 `cloudide/...` 的 refreshToken 老端点 |
+
+少了 `code_challenge` 时，控制台页面走到它那条老分支（`GetRefreshToken` → 用 refresh
+token 换令牌），而这条分支现在会失败——页面把任何失败都渲染成同一句「请检查是否开启了
+网络代理」，所以看起来像网络问题。本包现在按官方客户端构造 URL 并发起 PKCE 换取；老的
+refreshToken 回调仍然认，作为兜底。
+
+`IDEVersion` 用官方客户端的 `appVersion`（3.4.2）而不是 `0.1.52`：后者是 JetHub 时代
+抄来的构建号。
 
 用户昵称在回调里会经 latin-1 误解一次（中文变乱码）。JetHub 的修法是把这个字符串当
 latin-1 再解一次 UTF-8；**本包不做这一步**，因为 2026-10-16 实测这一步两头都不成立：
@@ -573,6 +598,16 @@ Trae 也提供 OpenCode V2 子入口（`opencode/trae.ts`）。它与另两家�
    保存 `uid` / `machineId` / `deviceId`。若 (a) 不成立，Trae 在 OpenCode 上无法工作，
    需要改用本地回环 shim（JetHub 与 `dsh-connect-trae` 用的就是那种架构）；若 (b) 不
    成立，这四个字段要改从插件 options / 环境变量读。
+
+发现与上述不符的现象时：先改 `src/vendors/<id>/product.ts` 的常量与本文档，
+再补一条回归测试；不要只改实现不留证据。
+17. **PKCE 换取令牌的请求体是否够用没有验证过**。本包按官方客户端构造
+   `{ClientID, AuthCode, CodeVerifier, IDEVersion}`；官方客户端还额外发一个
+   `DeviceInfo` 块（含设备指纹、平台码，以及一对 RSA 公钥/私钥里的**公钥**）。
+   服务端是否强制要求它，只有在真机走完一次 PKCE 登录才知道：目前对
+   `/trae/api/v3/oauth/ExchangeToken` 的探测（2026-10-16，两个 host 都试过）在没有
+   合法 `AuthCode` 时只回 `10101 无效参数`，无法区分「缺 DeviceInfo」与「码是假的」。
+   若真机登录报无效参数，第一处要试的就是补上 `DeviceInfo`。
 
 发现与上述不符的现象时：先改 `src/vendors/<id>/product.ts` 的常量与本文档，
 再补一条回归测试；不要只改实现不留证据。
