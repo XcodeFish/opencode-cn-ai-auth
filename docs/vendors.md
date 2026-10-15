@@ -172,10 +172,35 @@ usage 窗口表达不了硬排除（只有**已知上限**的窗口才会参与�
 - 落在 `failQuota` 才会让宿主把账号 bench 到窗口重置（`c.full(now)` → `By: "window"`），
   这正是门禁的目的：锁定的账号应该在今日额度重置时自己回来。
 
+### 新手任务（10000 分）
+
+`GET /onboarding/tasks` 读 8 个任务的完成标记，`POST /onboarding/tasks/complete
+{key}` 领一项。表与分值抄自客户端 `electron/onboarding-service.js` 的 `TASK_POINTS`
+（其单测断言 8 项之和 === 10000），`product.ts` 的 `LOOMY_TASK_POINTS` 是唯一落点。
+
+**服务端不校验前置行为。** 2026-09-26 JetHub 对 8 个任务逐个发 `POST /complete`，
+没有真的发对话、生成 PPT、装技能，全部回 `000000`，余额 0 → 10000：完成条件全在
+客户端本地判定，服务端只做「幂等置位 + 加分」。所以本包也是**纯 API 直领**，
+一个模型 token 都不花。上报 body 只有 `key`（无设备指纹、无版本号）。
+
+**为什么挂在 `auth.checkin` 上。** 宿主的钩子只有 `config` / `provider.models` /
+`auth.{provider,methods,loader,usage,checkin,refresh,refreshLead,icon,maxConcurrency}`
+（读自本机 magpie 0.1.1254 的 `plugin-host`），**没有一次性奖励钩子**；`checkin` 是
+唯一的写钩子，也是唯一有手动入口的（额度卡片的 `Check in now`、`magpie accounts
+checkin`、Settings › Daily check-in › Plugins 的自动开关，三者都实测对 loomy 生效）。
+于是签约当天顺手补领没领的任务：**已领完的账号一次请求都不发**（8 项全 `true` 时
+只读一次任务表），每天最多多一次只读。
+
+- **幂等判据是响应体的 `alreadyCompleted`**，不是 HTTP 码、不是 `code`；重放算成功。
+- **不采信服务端 `earned`**（JetHub 见它与本地表不一致），按本地表现算。
+- **中途被拒就停**：`100002` 立即停手，不再对剩余 key 发请求（否则是 7 个必失败
+  请求），并把中断原因写进 message。
+- **任务分不进 `credit`**：`credit` 会被读成「今日发放」，把 10000 永久积分报在那儿
+  等于谎报每日额度。任务情况只写 `message`，`credit` 仍只算当日额度。
+- **`100002` 仍抛 `SignInExpiredError`**，让宿主标记账号需重新登录（和签到同一条规则）。
+
 ### 已知限制
 
-- **新手任务 10000 分不做**：宿主没有对应钩子，插件不静默替用户领奖；需要去官方
-  客户端领取。
 - 签到只在宿主调度时发生（magpie 负责按北京日调度与失败重试），插件本身不带定时器。
 
 ### 图标

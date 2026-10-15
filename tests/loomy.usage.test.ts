@@ -203,6 +203,56 @@ describe("checkinResult", () => {
     })
   })
 
+  test("新手任务的积分不进 credit，只写在 message 里", () => {
+    // credit 是「今日发放」，把 10000 永久积分报在那儿会被读成每日额度。
+    const result = checkinResult(
+      { alreadyProcessed: true, dailyQuota: 5000, daily: 4995 },
+      {
+        claimed: ["generate_ppt", "share_soul"],
+        skipped: ["first_message"],
+        earned: 3500,
+        total: 10_000,
+        done: 3,
+      },
+    )
+    expect(result.outcome).toBe("done")
+    expect(result.credit).toBe(0)
+    expect(result.message).toBe(
+      "今日额度已初始化（今日 4995/5000）；新手任务补领 2 项 +3500（生成第一份 PPT、把搭子分享给朋友），累计 3500/10000（3/8 项）",
+    )
+  })
+
+  test("没有可领的任务时 message 与不带任务时一模一样", () => {
+    const bare = checkinResult({
+      alreadyProcessed: false,
+      dailyQuota: 5000,
+      dailyConsumed: 1000,
+      daily: 4000,
+    })
+    const withTasks = checkinResult(
+      { alreadyProcessed: false, dailyQuota: 5000, dailyConsumed: 1000, daily: 4000 },
+      { claimed: [], skipped: ["first_message"], earned: 500, total: 10_000, done: 1 },
+    )
+    expect(withTasks).toStrictEqual(bare)
+  })
+
+  test("领取中途被拒时如实说明中断原因，下次还会再试", () => {
+    const result = checkinResult(
+      { alreadyProcessed: true, dailyQuota: 5000, daily: 4995 },
+      {
+        claimed: ["first_message"],
+        skipped: [],
+        earned: 500,
+        total: 10_000,
+        done: 1,
+        error: { code: "100002", message: "缺少 token" },
+      },
+    )
+    expect(result.message).toBe(
+      "今日额度已初始化（今日 4995/5000）；新手任务补领 1 项 +500（发送你的第一条消息），累计 500/10000（1/8 项）；因「缺少 token」中断，还剩未领的，下次签到再试",
+    )
+  })
+
   test("新发放时 credit = quota - consumed，且不为负", () => {
     expect(
       checkinResult({ alreadyProcessed: false, dailyQuota: 5000, dailyConsumed: 1200, daily: 3800 }),

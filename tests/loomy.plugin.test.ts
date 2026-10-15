@@ -120,6 +120,85 @@ describe("没有账号的入口", () => {
   })
 })
 
+describe("checkin 的接线", () => {
+  const DAILY = jsonOk({
+    code: "000000",
+    desc: "成功",
+    data: { alreadyProcessed: false, dailyQuota: 5000, dailyConsumed: 1000, dailyBalance: 4000 },
+  })
+  const TASKS_PARTIAL = jsonOk({
+    code: "000000",
+    desc: "成功",
+    data: { tasks: { first_message: true }, earned: 500, total: 10_000 },
+  })
+  const COMPLETE_OK = jsonOk({
+    code: "000000",
+    desc: "成功",
+    data: { alreadyCompleted: false, balance: 500 },
+  })
+
+  async function withFetch<T>(fetcher: ReturnType<typeof cannedFetch>, run: () => Promise<T>): Promise<T> {
+    const original = globalThis.fetch
+    globalThis.fetch = fetcher
+    try {
+      return await run()
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+
+  test("一次签到顺手把没领的新手任务领完，credit 只算当日额度", async () => {
+    const fetcher = cannedFetch([
+      { match: "/onboarding/tasks/complete", respond: COMPLETE_OK },
+      { match: "/onboarding/tasks", respond: TASKS_PARTIAL },
+      { match: "/points/first-login", respond: DAILY },
+    ])
+    const hooks = await loomyHooks()
+    const checkin = hooks.auth.checkin
+    if (checkin === undefined) throw new Error("loomy 必须有 checkin 钩子")
+    const result = await withFetch(fetcher, () => checkin(async () => AUTH, PROVIDER))
+
+    expect(result.outcome).toBe("claimed")
+    // 4000 是当日额度（5000−1000）；新手任务的 9500 分不进 credit。
+    expect(result.credit).toBe(4000)
+    expect(result.message).toContain("今日额度已发放（今日 4000/5000）")
+    expect(result.message).toContain("新手任务补领 7 项")
+    expect(result.message).toContain("累计 10000/10000（8/8 项）")
+
+    // 已有的一条不重发，剩下七条各发一次。
+    expect(fetcher.callsMatching("/onboarding/tasks/complete")).toHaveLength(7)
+    expect(fetcher.callsMatching("/points/first-login")).toHaveLength(1)
+  })
+
+  test("任务表读不到也不影响签到本身（当日额度照发）", async () => {
+    const fetcher = cannedFetch([
+      { match: "/onboarding/tasks", respond: jsonOk({ code: "500", desc: "boom" }) },
+      { match: "/points/first-login", respond: DAILY },
+    ])
+    const hooks = await loomyHooks()
+    const checkin = hooks.auth.checkin
+    if (checkin === undefined) throw new Error("loomy 必须有 checkin 钩子")
+    const result = await withFetch(fetcher, () => checkin(async () => AUTH, PROVIDER))
+    expect(result.outcome).toBe("claimed")
+    expect(result.credit).toBe(4000)
+    // 读不到任务表时不写任何任务文案（不让「读不到」假装成「没问题」）。
+    expect(result.message).toBe("今日额度已发放（今日 4000/5000）")
+  })
+
+  test("任务端点回 100002 时抛 SignInExpiredError，让宿主标记账号", async () => {
+    const fetcher = cannedFetch([
+      { match: "/onboarding/tasks", respond: jsonOk({ code: "100002", desc: "缺少 token" }) },
+      { match: "/points/first-login", respond: DAILY },
+    ])
+    const hooks = await loomyHooks()
+    const checkin = hooks.auth.checkin
+    if (checkin === undefined) throw new Error("loomy 必须有 checkin 钩子")
+    const error = await withFetch(fetcher, () => rejectionError(() => checkin(async () => AUTH, PROVIDER)))
+    expect(error).toBeInstanceOf(SignInExpiredError)
+    expect(error.message).toBe("loomy: 新手任务被拒绝：缺少 token")
+  })
+})
+
 describe("loader 的门禁接线", () => {
   test("锁定时今日余额为 0 的请求不下发，直接 429", async () => {
     forgetDailyBalances()

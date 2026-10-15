@@ -231,4 +231,52 @@ export const LOOMY_PATHS = Object.freeze({
   models: "/models",
   points: "/points/records?pageNo=1&pageSize=1&recordType=all",
   firstLogin: "/points/first-login",
+  onboardingTasks: "/onboarding/tasks",
+  onboardingComplete: "/onboarding/tasks/complete",
+})
+
+/**
+ * The new-user tasks ("新手任务"), keyed as the service keys them, with the
+ * credits each is worth.
+ *
+ * Read out of the Loomy client's `electron/onboarding-service.js:18-27`
+ * (`TASK_POINTS`, whose own test asserts the eight sum to 10 000), the same
+ * table JetHub ported. The order is the client's registry order and is what
+ * this package claims in.
+ *
+ * Why this package may claim them at all: the service does not check that
+ * anything happened. JetHub posted all eight to `onboarding/tasks/complete`
+ * on 2026-09-26 — no chat sent, no PPT generated, no skill installed — and
+ * every one answered `000000`, taking the balance from 0 to 10 000. The
+ * client decides completion locally; the service only sets the flag and adds
+ * the credits, which makes this a plain API claim that spends no model
+ * tokens.
+ */
+export const LOOMY_TASK_POINTS: Readonly<Record<string, number>> = Object.freeze({
+  first_message: 500,
+  pick_skill: 1000,
+  generate_ppt: 1500,
+  set_schedule: 1000,
+  install_skill: 1500,
+  configure_remote: 1000,
+  create_soul: 1500,
+  share_soul: 2000,
+})
+
+/** What all eight tasks are worth together. */
+export const LOOMY_ONBOARDING_TOTAL = 10_000
+
+/**
+ * The tasks, in claim order, as Chinese titles — the client's own wording
+ * (`GE` registry), so a message this package writes reads like the app's.
+ */
+export const LOOMY_TASK_TITLES: Readonly<Record<string, string>> = Object.freeze({
+  first_message: "发送你的第一条消息",
+  pick_skill: "试试选择一个技能",
+  generate_ppt: "生成第一份 PPT",
+  set_schedule: "设置定时任务",
+  install_skill: "在技能广场安装一个技能",
+  configure_remote: "配置远程控制",
+  create_soul: "创建你的第一个搭子",
+  share_soul: "把搭子分享给朋友",
 })

@@ -2,6 +2,26 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.4.0] - 2026-10-15
+
+### Added
+
+- Loomy 的新手任务（8 项 / 10000 分）随每日签到一起补领：`auth.checkin` 里先领当日
+  额度，再把没完成的任务逐个领掉。服务端不校验前置行为（JetHub 2026-09-26 实测，
+  没发对话、没生成 PPT 也全过），所以是纯 API 直领，不花模型 token；**已领完的账号
+  一个 `complete` 请求都不发**，只多一次只读任务表。
+- 领取是幂等的（`alreadyCompleted` 算成功）、按表顺序串行、**中途被拒就停手**不再发
+  剩余请求，中断原因写进签到消息；`100002` 仍抛 `SignInExpiredError` 让宿主标记账号。
+- 任务分**不计入 `credit`**（那是「今日额度」，把 10000 永久积分报在那儿等于谎报每日
+  额度），只写进签到消息，带任务标题与累计进度。
+
+### Known
+
+- 触发方式：`magpie accounts checkin`（实测对 loomy 生效，不受开关影响），或在
+  Settings › Daily check-in › Plugins 打开 Loomy 的开关后用卡片上的 `Check in now`
+  与每日自动签到。宿主对 loomy 的插件签到**默认关闭**（`PluginCheckinOn` 只对
+  WorkBuddy / Trae CN / MiniMax / Qoder 有继承默认值），需要用户开一次。
+
 ## [0.3.0] - 2026-10-15
 
 ### Added

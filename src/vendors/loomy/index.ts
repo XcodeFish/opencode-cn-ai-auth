@@ -15,7 +15,7 @@ import { vendorLogger } from "../../core/log.ts"
 import { markFallback, toConfigModels, toModelRecord } from "../../core/models.ts"
 import { defineVendor, modelContextOf, type VendorContext } from "../../core/plugin.ts"
 import type { ModelRecord, UsageReport } from "../../core/types.ts"
-import { chatHeaders, claimDailyQuota, fetchCatalog, fetchPoints } from "./api.ts"
+import { chatHeaders, claimDailyQuota, claimOnboardingTasks, fetchCatalog, fetchPoints } from "./api.ts"
 import { lockedRefusal, rememberDailyBalance } from "./balance.ts"
 import { loginMethods } from "./login.ts"
 import { fallbackModels, modelsFrom } from "./models.ts"
@@ -103,7 +103,18 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
       })
     },
 
-    /** The vendor's own "first login of the day", which is its check-in. */
+    /**
+     * The vendor's own "first login of the day", which is its check-in —
+     * and, on the same press, the new-user tasks the account has not
+     * finished.
+     *
+     * The tasks ride here because this hook is the only write the host
+     * offers and the only one a user can press on demand (`Check in now`).
+     * Claiming them spends no model tokens: the service sets the flag and
+     * adds the credits without checking that anything happened (`api.ts`).
+     * An account with all eight done sends nothing, so the usual case costs
+     * a single extra read.
+     */
     async checkin(context) {
       const auth = await context.getAuth()
       const access = requireSession(auth, "签到")
@@ -118,7 +129,16 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
       // A check-in is the other way the day's balance becomes known, and the
       // gate must see it at once rather than wait for the next usage read.
       rememberDailyBalance(auth, grant.data.daily)
-      return checkinResult(grant.data)
+      // The day's quota is what the host stores; the task claim is best
+      // effort on top of it, and a refusal there must not undo the check-in.
+      const tasks = await claimOnboardingTasks(fetch, access)
+      if (!tasks.ok) {
+        if (tasks.code === LOOMY_SIGNED_OUT_CODE) {
+          throw new SignInExpiredError(LOOMY_ID, `新手任务被拒绝：${tasks.message}`)
+        }
+        await log.warn(`新手任务领取失败：${tasks.message}`)
+      }
+      return checkinResult(grant.data, tasks.ok ? tasks.data : undefined)
     },
   }
 })

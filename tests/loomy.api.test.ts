@@ -13,8 +13,10 @@ import {
   bindSkip,
   bindWechat,
   claimDailyQuota,
+  claimOnboardingTasks,
   extractUuid,
   fetchCatalog,
+  fetchOnboarding,
   type LoomyQrStatus,
   loginWithSmsCode,
   parseEnvelope,
@@ -441,5 +443,135 @@ describe("第三方登录的错误码", () => {
     ])
     const error = await rejectionError(() => bindWechat(fetcher, KEYS, "CODE-1"))
     expect(error.message).toBe("loomy: 请求参数错误")
+  })
+})
+
+describe("新手任务", () => {
+  function tasksBody(tasks: Record<string, boolean>, total = 10_000): ReturnType<typeof jsonOk> {
+    return jsonOk({ code: "000000", desc: "成功", data: { tasks, earned: 0, total } })
+  }
+
+  test("fetchOnboarding 把缺的 key 补 false，并按本地表算 earned", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/onboarding/tasks",
+        respond: tasksBody({ first_message: true, share_soul: true, unknown_task: true }),
+      },
+    ])
+    const state = await fetchOnboarding(fetcher, ACCESS)
+    if (!state.ok) throw new Error(`期望成功，实际 ${JSON.stringify(state)}`)
+    expect(state.data.tasks).toStrictEqual({
+      first_message: true,
+      pick_skill: false,
+      generate_ppt: false,
+      set_schedule: false,
+      install_skill: false,
+      configure_remote: false,
+      create_soul: false,
+      share_soul: true,
+    })
+    expect(state.data.done).toBe(2)
+    // 500 + 2000，本地现算：服务端回的 earned 0 不采信。
+    expect(state.data.earned).toBe(2500)
+    expect(state.data.total).toBe(10_000)
+    // 只读：用 GET，不带 body。
+    const call = at(fetcher.calls, 0)
+    expect(call.url).toBe("https://loomyad.xunfei.cn/api/v1/onboarding/tasks")
+    expect(call.init?.method ?? "GET").toBe("GET")
+    expect(headersOf(call).token).toBe(ACCESS)
+  })
+
+  test("claimOnboardingTasks 只对未完成的 key 发 POST，并且串行", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/onboarding/tasks/complete",
+        respond: jsonOk({ code: "000000", data: { alreadyCompleted: false, balance: 500 } }),
+      },
+      {
+        match: "/onboarding/tasks",
+        respond: tasksBody({ first_message: true, pick_skill: true }),
+      },
+    ])
+    const result = await claimOnboardingTasks(fetcher, ACCESS)
+    if (!result.ok) throw new Error(`期望成功，实际 ${JSON.stringify(result)}`)
+    expect(result.data.skipped).toStrictEqual(["first_message", "pick_skill"])
+    expect(result.data.claimed).toStrictEqual([
+      "generate_ppt",
+      "set_schedule",
+      "install_skill",
+      "configure_remote",
+      "create_soul",
+      "share_soul",
+    ])
+    expect(result.data.done).toBe(8)
+    expect(result.data.earned).toBe(10_000)
+    expect(result.data.error).toBeUndefined()
+    const posts = fetcher.callsMatching("/onboarding/tasks/complete")
+    expect(posts).toHaveLength(6)
+    // 已完成的两个一个请求都不发 —— 「一键」在领完的账号上是零开销。
+    expect(posts.map((call) => JSON.parse(String(call.init?.body)).key)).toStrictEqual([
+      "generate_ppt",
+      "set_schedule",
+      "install_skill",
+      "configure_remote",
+      "create_soul",
+      "share_soul",
+    ])
+    expect(at(posts, 0).init?.method).toBe("POST")
+  })
+
+  test("全领完的账号只读一次任务表，不发 complete", async () => {
+    const all = Object.fromEntries(
+      Object.keys({
+        first_message: 1,
+        pick_skill: 1,
+        generate_ppt: 1,
+        set_schedule: 1,
+        install_skill: 1,
+        configure_remote: 1,
+        create_soul: 1,
+        share_soul: 1,
+      }).map((key) => [key, true]),
+    )
+    const fetcher = cannedFetch([{ match: "/onboarding/tasks", respond: tasksBody(all) }])
+    const result = await claimOnboardingTasks(fetcher, ACCESS)
+    if (!result.ok) throw new Error(`期望成功，实际 ${JSON.stringify(result)}`)
+    expect(result.data.claimed).toStrictEqual([])
+    expect(result.data.skipped).toHaveLength(8)
+    expect(result.data.earned).toBe(10_000)
+    expect(fetcher.callsMatching("/onboarding/tasks/complete")).toHaveLength(0)
+    expect(fetcher.calls).toHaveLength(1)
+  })
+
+  test("中途被拒就停下，如实报已领了哪些（不发后面的请求）", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/onboarding/tasks/complete",
+        respond: (_url, init) => {
+          const key = JSON.parse(String(init?.body)).key as string
+          return key === "install_skill"
+            ? jsonOk({ code: "100002", desc: "缺少 token" })
+            : jsonOk({ code: "000000", data: { alreadyCompleted: false, balance: 0 } })
+        },
+      },
+      { match: "/onboarding/tasks", respond: tasksBody({}, 10_000) },
+    ])
+    const result = await claimOnboardingTasks(fetcher, ACCESS)
+    if (!result.ok) throw new Error(`断言失败就停止，应当是 ok 带 error：${JSON.stringify(result)}`)
+    expect(result.data.claimed).toStrictEqual(["first_message", "pick_skill", "generate_ppt", "set_schedule"])
+    expect(result.data.error).toStrictEqual({ code: "100002", message: "缺少 token" })
+    expect(result.data.done).toBe(4)
+    expect(result.data.earned).toBe(4000)
+    // 第 5 个失败后就不再发第 6、7、8 个。
+    expect(fetcher.callsMatching("/onboarding/tasks/complete")).toHaveLength(5)
+  })
+
+  test("任务表读不到时原样上报失败，不猜状态", async () => {
+    const fetcher = cannedFetch([
+      { match: "/onboarding/tasks", respond: jsonOk({ code: "100002", desc: "缺少 token" }) },
+    ])
+    const result = await claimOnboardingTasks(fetcher, ACCESS)
+    expect(result).toStrictEqual({ ok: false, code: "100002", message: "缺少 token" })
+    expect(fetcher.callsMatching("/onboarding/tasks/complete")).toHaveLength(0)
   })
 })

@@ -21,7 +21,8 @@
  */
 
 import type { CheckinResult, UsageReport, UsageWindow } from "../../core/types.ts"
-import type { LoomyDailyGrant, LoomyPoints } from "./api.ts"
+import type { LoomyDailyGrant, LoomyOnboardingClaim, LoomyPoints } from "./api.ts"
+import { LOOMY_TASK_TITLES } from "./product.ts"
 
 /** The Beijing day's reset, as epoch milliseconds. */
 export function beijingResetAt(now: number, cycleDate?: string): number {
@@ -162,15 +163,44 @@ export function usageReport(points: LoomyPoints, options: { user?: string; now?:
  * The check-in answer as the host's outcomes: `alreadyProcessed` is the
  * vendor saying the day's quota was handed out already, which is `done` and
  * not `claimed` — a `claimed` there would read as credits just earned.
+ *
+ * `onboarding` is the new-user task claim that rides along with the check-in.
+ * Its credits are deliberately kept out of `credit`: that number is read as
+ * the day's handout, and 10 000 permanent credits reported there would look
+ * like a daily quota. They are named in the message instead, and the outcome
+ * only stays `claimed` when the day's own quota was handed out — finishing a
+ * task is not the day's check-in.
  */
-export function checkinResult(grant: LoomyDailyGrant): CheckinResult {
+export function checkinResult(grant: LoomyDailyGrant, onboarding?: LoomyOnboardingClaim): CheckinResult {
   const quota = grant.dailyQuota
   const left = grant.daily
   const detail = quota === undefined ? "" : `（今日 ${left ?? 0}/${quota}）`
+  const tasks = onboardingMessage(onboarding)
   if (grant.alreadyProcessed) {
-    return { outcome: "done", credit: 0, message: `今日额度已初始化${detail}` }
+    return { outcome: "done", credit: 0, message: `今日额度已初始化${detail}${tasks}` }
   }
   const consumed = grant.dailyConsumed
   const credit = quota === undefined ? 0 : consumed === undefined ? quota : Math.max(0, quota - consumed)
-  return { outcome: "claimed", credit, message: `今日额度已发放${detail}` }
+  return { outcome: "claimed", credit, message: `今日额度已发放${detail}${tasks}` }
+}
+
+/**
+ * What to say about the task claim, or nothing when it has nothing to say.
+ *
+ * Every task the account can finish is reported once, by title, so the row
+ * says what the credits were for; a partial run names what stopped it, since
+ * the next check-in would otherwise look like it had simply done nothing.
+ */
+function onboardingMessage(claim: LoomyOnboardingClaim | undefined): string {
+  if (claim === undefined) return ""
+  if (claim.claimed.length === 0 && claim.error === undefined) return ""
+  const titles = claim.claimed.map((key) => LOOMY_TASK_TITLES[key] ?? key).join("、")
+  const total = Object.keys(LOOMY_TASK_TITLES).length
+  const parts = [`新手任务补领 ${claim.claimed.length} 项 +${claim.earned}`]
+  if (titles.length > 0) parts.push(`（${titles}）`)
+  parts.push(`，累计 ${claim.earned}/${claim.total}（${claim.done}/${total} 项）`)
+  if (claim.error !== undefined) {
+    parts.push(`；因「${claim.error.message}」中断，还剩未领的，下次签到再试`)
+  }
+  return `；${parts.join("")}`
 }

@@ -23,11 +23,13 @@ import {
   LOOMY_API_BASE,
   LOOMY_APP_ID,
   LOOMY_OK_CODE,
+  LOOMY_ONBOARDING_TOTAL,
   LOOMY_PATHS,
   LOOMY_REQUEST_TIMEOUT_MS,
   LOOMY_SESSION_TTL_SECONDS,
   LOOMY_SIGNED_OUT_CODE,
   LOOMY_SMS_TTL_SECONDS,
+  LOOMY_TASK_POINTS,
   LOOMY_WECHAT_APP_ID,
   LOOMY_WECHAT_POLL_TIMEOUT_MS,
   LOOMY_WECHAT_REDIRECT_URI,
@@ -419,6 +421,121 @@ export async function claimDailyQuota(fetcher: Fetcher, access: string): Promise
   return {
     ok: true,
     data: { ...readPoints(result.data), alreadyProcessed: result.data?.alreadyProcessed === true },
+  }
+}
+
+// ---- the new-user tasks ------------------------------------------------------
+
+export interface LoomyOnboarding {
+  /** A flag per known key; an unknown or missing key reads as not done. */
+  tasks: Record<string, boolean>
+  /** How many of the eight are done, counted against this package's table. */
+  done: number
+  /** What the done ones are worth, summed locally (see `claimOnboardingTasks`). */
+  earned: number
+  /** What all of them are worth: 10 000, or the service's own total. */
+  total: number
+}
+
+/** Reads the task flags, keeping only the keys this package knows. */
+function readOnboarding(data: Record<string, unknown> | undefined): LoomyOnboarding {
+  const raw = asObject(data?.tasks) ?? {}
+  const tasks: Record<string, boolean> = {}
+  for (const key of Object.keys(LOOMY_TASK_POINTS)) tasks[key] = raw[key] === true
+  const doneKeys = Object.keys(tasks).filter((key) => tasks[key] === true)
+  // The service's own `earned` is deliberately ignored: JetHub found it
+  // disagreeing with the table, and the client itself sums locally.
+  const stated = num(data?.total)
+  return {
+    tasks,
+    done: doneKeys.length,
+    earned: earnedOf(doneKeys),
+    total: stated === undefined ? LOOMY_ONBOARDING_TOTAL : stated,
+  }
+}
+
+/** The task flags, read-only. */
+export async function fetchOnboarding(fetcher: Fetcher, access: string): Promise<LoomyRead<LoomyOnboarding>> {
+  const result = await productRead<Record<string, unknown>>(fetcher, access, LOOMY_PATHS.onboardingTasks)
+  if (!result.ok) return result
+  return { ok: true, data: readOnboarding(result.data) }
+}
+
+/**
+ * Claims every task the account has not finished, and reports what it did.
+ *
+ * One `POST` per unfinished key, in table order, skipping the finished ones
+ * entirely — an account that has them all (the usual case after the first
+ * claim) spends no request at all. The service is idempotent per key and
+ * answers `alreadyCompleted: true` for one it had already set, which counts
+ * as success here for the same reason: the flag is set and the credits are
+ * there either way.
+ *
+ * The first refusal stops the run: a signed-out session would answer
+ * `100002` to every remaining key, and eight guaranteed failures are worse
+ * than one reported failure. The partial result is returned with the error,
+ * so the caller can say how far it got.
+ */
+export interface LoomyOnboardingClaim {
+  /** The keys claimed in this run, in table order. */
+  claimed: string[]
+  /** The keys that were already done, which cost no request. */
+  skipped: string[]
+  /** What every done key is worth, once this run's are counted. */
+  earned: number
+  total: number
+  done: number
+  /** The service's refusal that stopped the run, when one did. */
+  error?: { code: string; message: string }
+}
+
+/** What a particular set of task keys is worth, summed locally. */
+function earnedOf(keys: readonly string[]): number {
+  return keys.reduce((sum, key) => sum + (LOOMY_TASK_POINTS[key] ?? 0), 0)
+}
+
+export async function claimOnboardingTasks(
+  fetcher: Fetcher,
+  access: string,
+): Promise<LoomyRead<LoomyOnboardingClaim>> {
+  const state = await fetchOnboarding(fetcher, access)
+  if (!state.ok) return state
+  const claimed: string[] = []
+  const skipped: string[] = []
+  const doneKeys = Object.keys(state.data.tasks).filter((key) => state.data.tasks[key] === true)
+  for (const key of Object.keys(LOOMY_TASK_POINTS)) {
+    if (state.data.tasks[key] === true) {
+      skipped.push(key)
+      continue
+    }
+    const result = await productRead<Record<string, unknown>>(
+      fetcher,
+      access,
+      LOOMY_PATHS.onboardingComplete,
+      {
+        method: "POST",
+        body: JSON.stringify({ key }),
+      },
+    )
+    if (!result.ok) {
+      return {
+        ok: true,
+        data: {
+          claimed,
+          skipped,
+          earned: earnedOf(doneKeys),
+          total: state.data.total,
+          done: doneKeys.length,
+          error: { code: result.code, message: result.message },
+        },
+      }
+    }
+    claimed.push(key)
+    doneKeys.push(key)
+  }
+  return {
+    ok: true,
+    data: { claimed, skipped, earned: earnedOf(doneKeys), total: state.data.total, done: doneKeys.length },
   }
 }
 

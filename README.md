@@ -107,7 +107,11 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
 | 思考档位 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） |
 | 用量卡片 | 两池：今日积分（参与选号）+ 永久积分（`aside`，只展示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） |
 | 锁定永久积分 | `options.lockPermanent: true` 时，今日额度用完即拒绝请求（429，宿主把账号 bench 到窗口重置），不再悄悄花永久积分 | — |
-| 每日签到 | 有：`POST /points/first-login`（幂等，返回当日额度） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 |
+| 每日签到 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 |
+- **新手任务（Loomy）**：宿主没有一次性奖励钩子，本包把它挂在唯一的写钩子 `auth.checkin`
+  上——点额度卡片的 `Check in now`、跑 `magpie accounts checkin`、或在 Settings ›
+  Daily check-in › Plugins 打开自动签到，都会顺手把没领的任务领掉。任务分不计入
+  `credit`（那是「今日额度」），只写在签到结果的消息里。详见 [`docs/vendors.md`](docs/vendors.md) §2。
 | 续期 | 没有 refresh 端点：会话 14 天，按本地时间记 `expires`，到期需重新登录 | 有：`POST /refresh` 轮换 `access_token`（`refresh_token` 缺省时保留旧值），提前 5 分钟刷新 |
 | 图片输入 | 按 `/models` 的输入模态 | 按目录 `tags` + 两个实测能读图但未标 vision 的模型白名单 |
 
@@ -262,8 +266,10 @@ scripts/check.ts         入口形状与依赖方向门禁
   在 `metadata` 里找到。读法收在 `core/stored.ts`，否则账号会静默丢组织码。
 - **密钥不进页面、不进仓库**：登录页只绑 `127.0.0.1:0`、URL 带随机前缀；页面里
   不出现密钥、token 与未打码手机号。
-- **不做没有钩子的事**：厂商的新手任务/一次性奖励没有对应钩子，插件不静默代领，
-  只在文档里说明去哪里领。
+- **不做没有钩子的事**：厂商的一次性奖励没有对应钩子就不代领（Raccoon 的 3000 分登录
+  奖励因此不做，只在文档里说明去哪里领）。Loomy 的新手任务**有**落点——宿主的
+  `auth.checkin` 是唯一写钩子、也是用户能手动按的那个，任务就随它走（见
+  `docs/vendors.md` §2）。
 - **图标由厂商自己托管**：两个 provider 的 `auth.icon` 各自指向厂商自己页面声明的
   logo（`product.ts` 的 `LOOMY_ICON` / `RACCOON_ICON`），仓库里不放品牌资源。
   宿主只接受 `https://` 图片网址或 `data:image/` URI，**裸图标名会被静默丢弃**
@@ -338,8 +344,8 @@ bun run verify  # 改动完成前必须全绿
 ## 已知边界
 
 - Raccoon 的「桌面端登录奖励」是三千里程碑式的一次性奖励，magpie 没有对应钩子（它既不是每日签到、也不该在后台偷偷代领），所以本包不实现；请到官方客户端领取。
-- Loomy 的「新手任务」积分同理：没有钩子，不做。
-- 本包只做只读的额度读取；唯一会写远端状态的调用是 Loomy 的每日额度领取（那正是 magpie 的 `checkin` 钩子）与 Raccoon 的 token 续期。
+- Loomy 的「新手任务」10000 分随每日签到一起领（宿主的 `auth.checkin` 是唯一写钩子；任务领取是纯 API 直领，服务端不校验前置行为）。已领完的账号不产生额外请求。
+- 本包只做只读的额度读取；会写远端状态的调用只有三个：Loomy 的每日额度领取、Loomy 的新手任务补领（两者都在 `auth.checkin` 里）、Raccoon 的 token 续期。
 - 短信登录依赖厂商自己的验证码链路（Raccoon 的阿里云滑块脚本来自其 CDN），离线或脚本被拦截时只有扫码可用。
 - 两家厂商都还没在 magpie 内跑过真实登录与真实聊天；当前证据是 `plugin add` 级别的加载与形状检查。逐条未验证边界登记在 `docs/vendors.md` §4。
 
