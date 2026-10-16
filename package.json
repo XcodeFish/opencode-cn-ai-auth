@@ -1,6 +1,6 @@
 {
   "name": "opencode-cn-ai-auth",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Magpie bundle and direct OpenCode entries for Loomy (讯飞), Raccoon (商汤小浣熊) and TRAE (字节跳动) coding subscriptions",
   "type": "module",
   "main": "./index.ts",

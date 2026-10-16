@@ -219,14 +219,6 @@ describe("登录流程的回调形状", () => {
    * 随机路径前缀时它会直接显示「登录失败 / 网络错误」（2026-10-16 无头 Chrome
    * 实测：换成根路径 /authorize 就出现正常登录界面）。这条断言就是那次回归。
    */
-  const start = async () => {
-    const method = loginMethods({
-      client: { auth: { set: async () => undefined } },
-      fetcher: cannedFetch([]),
-    })[0]
-    if (method === undefined || method.type !== "oauth") throw new Error("Trae 的登录方式应当是 oauth")
-    return await method.authorize()
-  }
 
   test("回调地址是源站根路径的 /authorize，没有随机前缀", async () => {
     const started = await start()
@@ -268,3 +260,73 @@ describe("登录流程的回调形状", () => {
     expect(result.type).toBe("failed")
   })
 })
+
+describe("回调路径的健壮性", () => {
+  /**
+   * 回归：一次「不带答案」的请求（浏览器可达性探测、刷新、favicon）曾被
+   * 当成回调处理，于是登录被判失败、服务器被关掉；随后浏览器真正带着
+   * authCodeInfo 跳回来时，端口已经没人监听（用户截图里的
+   * ERR_CONNECTION_REFUSED）。
+   */
+  test("不带答案的探测请求不结束登录，真正带授权码的那一跳才算数", async () => {
+    const started = await start()
+    const params = new URL(started.url ?? "").searchParams
+    const callback = params.get("auth_callback_url") ?? ""
+
+    const probe = await fetch(callback)
+    expect(probe.status).toBe(200)
+    expect(await probe.text()).toContain("等待浏览器完成授权")
+
+    const ok = await fetch(
+      `${callback}?${new URLSearchParams({
+        loginTraceID: params.get("login_trace_id") ?? "",
+        authCodeInfo: JSON.stringify({ AuthCode: "x" }),
+        userInfo: JSON.stringify({ UserID: "u" }),
+      })}`,
+    )
+    expect(ok.status).toBe(200)
+    const result = (await started.callback()) as { type?: string }
+    expect(result.type).toBe("failed")
+  })
+
+  test("控制台拒绝授权时把错误码与原因如实说出来", () => {
+    const parsed = parseCallback("/authorize?error_code=20401&error_msg=%E8%AE%BE%E5%A4%87%E8%B6%85%E9%99%90")
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) return
+    expect(parsed.reason).toContain("20401")
+    expect(parsed.reason).toContain("设备超限")
+  })
+
+  test("浏览器连不上本机时，宿主把地址粘回来也能完成（走授权码那条）", async () => {
+    const started = await start()
+    const params = new URL(started.url ?? "").searchParams
+    const pasted = `${params.get("auth_callback_url") ?? ""}?${new URLSearchParams({
+      loginTraceID: params.get("login_trace_id") ?? "",
+      authCodeInfo: JSON.stringify({ AuthCode: "x" }),
+      userInfo: JSON.stringify({ UserID: "u" }),
+    })}`
+    const result = (await started.callback(pasted)) as { type?: string }
+    // 换取令牌会失败（码是假的、假 fetcher 没有路由），但关键是它**走到了**
+    // 授权码那条路：说明粘贴回来的地址被当成一次真实回调处理了。
+    expect(result.type).toBe("failed")
+  })
+
+  test("粘回来的是别人的地址时拒绝，而不是拿它去登录", async () => {
+    const started = await start()
+    const pasted =
+      "http://127.0.0.1:1/authorize?loginTraceID=someone-else&authCodeInfo=%7B%22AuthCode%22%3A%22x%22%7D"
+    const result = (await started.callback(pasted)) as { type?: string; error?: string }
+    expect(result.type).toBe("failed")
+    expect(result.error).toContain("不属于本次登录")
+  })
+})
+
+/** 起一次真实登录流程，返回 authorize() 的结果（含 url 与 callback）。 */
+async function start() {
+  const method = loginMethods({
+    client: { auth: { set: async () => undefined } },
+    fetcher: cannedFetch([]),
+  })[0]
+  if (method === undefined || method.type !== "oauth") throw new Error("Trae 的登录方式应当是 oauth")
+  return await method.authorize()
+}

@@ -206,6 +206,19 @@ export function parseCallback(rawUrl: string): TraeCallbackResult {
   // The callback spells it `TenantID`, not `EnterpriseID`.
   const enterpriseId = jsonText(userInfo, "TenantID")
 
+  // The console reports a refusal (a cancelled consent, a policy block) as
+  // an error pair on the callback rather than by not sending one. Passing
+  // that through as "no credentials" would describe the wrong problem.
+  const errorCode = (query.get("error_code") ?? query.get("errorCode") ?? "").trim()
+  if (errorCode.length > 0 && errorCode !== "0") {
+    const reason = (query.get("error_msg") ?? query.get("errorMsg") ?? "").trim()
+    return {
+      ok: false,
+      authCodeFlow: false,
+      reason: `控制台拒绝了这次授权（code=${errorCode}）${reason.length > 0 ? `：${reason}` : ""}`,
+    }
+  }
+
   const fromQuery = query.get("refreshToken") ?? ""
   const jwtRefresh = jsonText(userJwt, "RefreshToken")
   const refreshToken = fromQuery.length > 0 ? fromQuery : jwtRefresh
@@ -499,6 +512,87 @@ function donePage(message: string): PageResponse {
 }
 
 /**
+ * Whether a request on the callback path actually carries the console's
+ * answer.
+ *
+ * Anything else — a reachability probe, a reload, a favicon — is answered and
+ * ignored: settling on one would end the sign-in and close the server, and
+ * the real redirect that follows would land on a dead port.
+ */
+function carriesAnswer(query: URLSearchParams): boolean {
+  const keys = [
+    "authCodeInfo",
+    "code",
+    "authCode",
+    "refreshToken",
+    "userJwt",
+    "userInfo",
+    "error_code",
+    "errorCode",
+  ]
+  return keys.some((key) => (query.get(key) ?? "").length > 0)
+}
+
+/** What a request with nothing in it sees: the flow is still open. */
+function waitingPage(): PageResponse {
+  return {
+    contentType: HTML,
+    body: renderLoginPage({
+      title: "登录 TRAE",
+      note: "等待浏览器完成授权",
+      accent: "#1f6feb",
+      body: '<p class="cn-hint">这一步只是确认本机回调可达，请回到授权页继续。</p>',
+      script: `cnStatus("cn-status", ${JSON.stringify("等待授权结果…")});`,
+    }),
+  }
+}
+
+/**
+ * Finish a sign-in from text the user handed over instead of a browser hop.
+ *
+ * Accepts the whole callback address (what magpie's paste prompt collects)
+ * or a bare authorization code, so a browser that cannot reach loopback is
+ * not a dead end.
+ */
+async function finishFromText(
+  text: string,
+  device: { machineId: string; deviceId: string },
+  deps: TraeLoginDeps,
+  pkce: TraePkce,
+  traceId: string,
+): Promise<SignInResult> {
+  const looksLikeUrl = text.includes("?") || text.startsWith("http")
+  const parsed = looksLikeUrl ? parseCallback(text) : undefined
+  if (parsed !== undefined) {
+    if (!parsed.ok) return { type: "failed", error: parsed.reason }
+    const query = new URL(text.startsWith("http") ? text : `http://127.0.0.1${text}`).searchParams
+    const echoed = query.get("loginTraceID")
+    if (echoed !== null && echoed !== traceId) {
+      return { type: "failed", error: "这段地址不属于本次登录，请重新发起" }
+    }
+    try {
+      return signInResult(await completeSignIn(parsed.callback, device, deps, pkce))
+    } catch (error) {
+      return { type: "failed", error: errorMessage(error) }
+    }
+  }
+  // A bare code: only the PKCE exchange can use it, and only with the
+  // verifier this sign-in kept.
+  try {
+    return signInResult(
+      await completeSignIn(
+        { refreshToken: "", accessToken: "", authCode: text, uid: "", nickname: "", enterpriseId: "" },
+        device,
+        deps,
+        pkce,
+      ),
+    )
+  } catch (error) {
+    return { type: "failed", error: errorMessage(error) }
+  }
+}
+
+/**
  * The sign-in method, as the host wants it.
  *
  * The work happens between `authorize()` returning and its `callback`
@@ -532,6 +626,13 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
             // the sign-in until the timeout instead of reporting a reason.
             const echoed = request.query.get("loginTraceID")
             if (echoed !== null && echoed !== traceId) return notFound()
+            // A request that carries no answer is not an answer. Browsers and
+            // the console page itself may touch this URL (a reachability
+            // probe, a reload, a favicon); treating one as "the callback"
+            // would fail the sign-in and close the server, and the real
+            // redirect — the one that arrives seconds later with the code —
+            // would hit a dead port (`ERR_CONNECTION_REFUSED`).
+            if (!carriesAnswer(request.query)) return waitingPage()
             try {
               const parsed = parseCallback(`/?${request.query.toString()}`)
               if (!parsed.ok) {
@@ -563,7 +664,22 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
           url: buildLoginUrl(device.machineId, device.deviceId, callbackUrl, pkce),
           instructions: "在浏览器中完成 TRAE 授权，页面会自动完成登录",
           method: "auto",
-          callback: async () => {
+          /**
+           * The host waits here for the browser hop.
+           *
+           * `pasted` is the recovery path magpie offers when the browser
+           * cannot reach loopback ("paste its whole address here"): the
+           * address always carries the answer, so it is parsed exactly like a
+           * delivered callback. That is what makes `ERR_CONNECTION_REFUSED`
+           * recoverable — the console did its part and the code is in the URL.
+           */
+          callback: async (pasted?: string) => {
+            const text = typeof pasted === "string" ? pasted.trim() : ""
+            if (text.length > 0) {
+              clearTimeout(timer)
+              server.close()
+              return await finishFromText(text, device, deps, pkce, traceId)
+            }
             try {
               return await settlement.promise
             } finally {

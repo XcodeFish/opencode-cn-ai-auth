@@ -2,6 +2,21 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.7.3] - 2026-10-16
+
+### Fixed
+
+- **`ERR_CONNECTION_REFUSED`：回调到达时本机已经没人监听**。截图里的地址其实带着控制台
+  产出的 `authCodeInfo`，也就是授权本身成功了，只是那一跳没接住。两个成因都修了：
+  (a) 以前任何落在 `/authorize` 的请求（探活、刷新、favicon）都会被当成回调，于是登录
+  被判失败、服务器被关掉，真正带授权码的那一跳只能打到死端口——现在只有带答案的请求
+  （`authCodeInfo` / `code` / `refreshToken` / `userJwt` / `error_code`）才算数，其它回一页
+  「等待浏览器完成授权」并继续等；(b) `magpie plugin login` 提示的「把最后停在的地址粘
+  回来」这条兜底此前被忽略——现在宿主把整串地址（或一枚裸授权码）交给 `callback` 时会
+  当作真实回调处理，仍校验 `loginTraceID`，浏览器连不上回环地址不再是死路。
+- 控制台拒绝授权时按 `error_code` / `error_msg` 如实报出（例如设备数超限），不再显示成
+  含糊的「回调未携带登录凭据」。
+
 ## [0.7.2] - 2026-10-16
 
 ### Fixed
