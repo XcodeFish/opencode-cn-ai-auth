@@ -17,15 +17,14 @@
  * must not misreport.
  */
 
-import { createHash, randomBytes } from "node:crypto"
 import { errorMessage, VendorError } from "../../core/errors.ts"
 import { type Fetcher, httpJson } from "../../core/http.ts"
 import { asObject, str } from "../../core/json.ts"
 import { HTML, notFound, type PageResponse, PageServer } from "../../core/local-page.ts"
-import { vendorLogger } from "../../core/log.ts"
+import { type VendorLogger, vendorLogger } from "../../core/log.ts"
 import { renderLoginPage } from "../../core/login-page.ts"
 import type { AuthMethod, PluginClient, SignInResult } from "../../core/types.ts"
-import { createSettlement } from "../../core/util.ts"
+import { createSettlement, type Settlement } from "../../core/util.ts"
 import {
   applyRefresh,
   buildCredential,
@@ -40,12 +39,14 @@ import {
 import {
   TRAE_APP_VERSION,
   TRAE_CALLBACK_PATH,
+  TRAE_CALLBACK_PORT,
   TRAE_CLIENT_ID,
   TRAE_CONSOLE_BASE,
   TRAE_ID,
   TRAE_IDE_VERSION,
   TRAE_OAUTH_BASE,
   TRAE_PATHS,
+  TRAE_PENDING_SIGN_IN_TTL_MS,
   TRAE_PLUGIN_VERSION,
   TRAE_REQUEST_TIMEOUT_MS,
   TRAE_SIGN_IN_TIMEOUT_MS,
@@ -71,30 +72,6 @@ export interface TraeLoginDeps {
  */
 function newDevice(): { machineId: string; deviceId: string } {
   return { machineId: generateMachineId(), deviceId: generateDeviceId() }
-}
-
-/**
- * One PKCE pair: the verifier kept here, the challenge sent to the console.
- *
- * The current client signs in with PKCE (`code_challenge` +
- * `code_challenge_method=S256`, measured from its bundle on 2026-10-16) and
- * exchanges the returned authorization code together with this verifier.
- * Without the pair the console falls back to a flow it no longer mints
- * tokens for — which is what the "登录失败 / 网络错误" screen was.
- */
-export interface TraePkce {
-  codeVerifier: string
-  codeChallenge: string
-}
-
-export function newPkce(): TraePkce {
-  const codeVerifier = randomBytes(32).toString("base64url")
-  return { codeVerifier, codeChallenge: challengeOf(codeVerifier) }
-}
-
-/** `BASE64URL(SHA256(ASCII(code_verifier)))`, as RFC 7636 defines S256. */
-export function challengeOf(codeVerifier: string): string {
-  return createHash("sha256").update(codeVerifier, "ascii").digest("base64url")
 }
 
 /**
@@ -124,13 +101,19 @@ export function traceIdOf(machineId: string, deviceId: string): string {
  *
  * The `x_*` parameters describe the client the console believes it is talking
  * to; leaving them out invites the risk control instead of the sign-in.
+ *
+ * **No `code_challenge`.** The console runs one of two flows, and the
+ * parameter is what picks it (`page.…js`: `er` = both `code_challenge` and
+ * `code_challenge_method` present). Without it the page hands back a
+ * **refresh token** — what JetHub's `buildTraeLoginURL` and
+ * `@magpie-community/opencode-trae-auth` get, and what this package can
+ * exchange (measured: the code exchange answers `10101 无效参数` for our body,
+ * and the refresh-token exchange answers `20101` only for a token that is
+ * actually spent). Sending it made this package the only one of the three on
+ * the code flow, with an exchange it could not complete — see
+ * `docs/vendors.md` §4.
  */
-export function buildLoginUrl(
-  machineId: string,
-  deviceId: string,
-  callbackUrl: string,
-  pkce: TraePkce,
-): string {
+export function buildLoginUrl(machineId: string, deviceId: string, callbackUrl: string): string {
   const params = new URLSearchParams({
     login_version: "1",
     auth_from: "solo",
@@ -150,10 +133,6 @@ export function buildLoginUrl(
     x_os_version: "1.0",
     x_app_version: TRAE_APP_VERSION,
     x_app_type: "stable",
-    // The pair that makes the console hand back an authorization code instead
-    // of trying to mint a refresh token for a legacy client.
-    code_challenge: pkce.codeChallenge,
-    code_challenge_method: "S256",
     // The client appends this for `auth_from=solo`; the console hides its
     // SaaS sign-in entry for a SOLO client, and we are one (our client id is
     // `authConfig.SOLO.stable`).
@@ -335,15 +314,20 @@ export async function completeSignIn(
   callback: TraeCallback,
   device: { machineId: string; deviceId: string },
   deps: TraeLoginDeps,
-  pkce?: TraePkce,
 ): Promise<TraeCredential> {
   const now = deps.now?.() ?? Date.now()
   let exchange: TraeExchange
   if (callback.authCode !== undefined) {
-    if (pkce === undefined) {
-      throw new VendorError(TRAE_ID, "收到授权码但没有本次登录的 PKCE 校验串，请重新发起登录")
-    }
-    exchange = await exchangeByAuthCode(callback.authCode, pkce.codeVerifier, deps)
+    // The console's other flow. This package does not ask for it (its sign-in
+    // URL carries no `code_challenge`) and does not implement its exchange —
+    // the body the official client sends there (`AuthCode` + `CodeVerifier` +
+    // `DeviceInfo`) is answered `10101 无效参数` when replayed from here, so
+    // guessing at it would spend a real authorization code on a wrong shape.
+    // Saying so is the honest answer; a retry goes down the flow that works.
+    throw new VendorError(
+      TRAE_ID,
+      "控制台返回了授权码（PKCE 流程），本包走的是刷新令牌那条流程；请重新发起登录",
+    )
   } else if (callback.refreshToken.length > 0) {
     exchange = await exchangeTokens(callback.refreshToken, deps)
   } else {
@@ -384,44 +368,6 @@ export async function completeSignIn(
     throw new VendorError(TRAE_ID, "登录未能确定账号 ID，请重试")
   }
   return buildCredential(exchange, userInfo, device, now)
-}
-
-/**
- * Trade the authorization code for tokens, with the PKCE verifier.
- *
- * This is the flow the current client uses: a different path from the legacy
- * refresh-token exchange, and the verifier is what proves the same client
- * that started the sign-in is finishing it. The body carries the client id,
- * the code, the verifier and the app version; the vendor's client also sends
- * a `DeviceInfo` block, which is not reproduced here — if the service turns
- * out to require it, this call is where the failure will show up.
- */
-async function exchangeByAuthCode(
-  authCode: string,
-  codeVerifier: string,
-  deps: TraeLoginDeps,
-): Promise<TraeExchange> {
-  const answer = await httpJson(deps.fetcher, `${TRAE_OAUTH_BASE}${TRAE_PATHS.exchangeByCode}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "User-Agent": TRAE_USER_AGENT,
-    },
-    body: JSON.stringify({
-      ClientID: TRAE_CLIENT_ID,
-      AuthCode: authCode,
-      CodeVerifier: codeVerifier,
-      IDEVersion: TRAE_APP_VERSION,
-    }),
-    timeoutMs: TRAE_REQUEST_TIMEOUT_MS,
-  })
-  if (!answer.ok) {
-    throw new VendorError(TRAE_ID, `授权码换取令牌失败（HTTP ${answer.status}）`, { status: answer.status })
-  }
-  const parsed = parseExchange(answer.json)
-  if (parsed === undefined) throw new VendorError(TRAE_ID, "授权码换取令牌的响应缺少 Token")
-  return parsed
 }
 
 /** One `ExchangeToken` call, shared by sign-in and renewal. */
@@ -492,6 +438,30 @@ export function signInResult(credential: TraeCredential): SignInResult {
 }
 
 /**
+ * Save a sign-in the host is no longer waiting for.
+ *
+ * Usually the plugin only *returns* the account (`AuthMethod.callback`'s
+ * result) and the host stores it. By the time a late redirect arrives, the
+ * host has already taken the flow's failure and stopped listening, so
+ * nothing would carry this result anywhere: the page writes it itself, into
+ * the account key the host uses for this provider's first account
+ * (`plugin-auth.json`).
+ *
+ * A failure is only logged: the host has reported the flow's own outcome by
+ * then, and writing a second one would go nowhere.
+ */
+async function saveLateSignIn(deps: TraeLoginDeps, result: SignInResult, log: VendorLogger): Promise<void> {
+  if (result.type !== "success") return
+  const { type: _type, provider: _provider, ...body } = result
+  try {
+    await deps.client.auth.set({ path: { id: TRAE_ID }, body: { type: "oauth", ...body } })
+    await log.info("浏览器回来得比这次登录的等待更晚：登录态已直接保存")
+  } catch (error) {
+    await log.warn(`迟到的登录结果没能保存：${errorMessage(error)}`)
+  }
+}
+
+/**
  * The page the browser lands on after the console is done with it.
  *
  * It is deliberately static: everything the browser needs to know has already
@@ -548,17 +518,45 @@ function waitingPage(): PageResponse {
 }
 
 /**
+ * What an answer nobody is waiting for sees.
+ *
+ * The address is fixed, so a browser can arrive with a trace id this process
+ * has no sign-in for: a tab from a session that ended, another magpie's
+ * sign-in, a bookmark. Redeeming it would need a device identity and a PKCE
+ * verifier that no longer exist, so it is refused and the user is told to
+ * start again — which is the one thing that will work.
+ */
+function unknownSignInPage(): PageResponse {
+  return {
+    contentType: HTML,
+    body: renderLoginPage({
+      title: "登录 TRAE",
+      note: "这次授权已经过期",
+      accent: "#d1242f",
+      body: '<p class="cn-hint">请在插件里重新发起一次登录。</p>',
+      script: `cnStatus("cn-status", ${JSON.stringify("请重新发起登录")});`,
+    }),
+  }
+}
+
+/** Same, for an answer older than the TTL. */
+function expiredPage(): PageResponse {
+  return unknownSignInPage()
+}
+
+/**
  * Finish a sign-in from text the user handed over instead of a browser hop.
  *
- * Accepts the whole callback address (what magpie's paste prompt collects)
- * or a bare authorization code, so a browser that cannot reach loopback is
- * not a dead end.
+ * Accepts the whole callback address, so a browser that cannot reach loopback
+ * is not a dead end: the address carries the answer (`refreshToken` and the
+ * user), and it is parsed exactly like a delivered callback. A bare string is
+ * refused with a reason — the answer is a URL, and guessing at a fragment of
+ * one would spend a real credential on a wrong guess.
  */
 async function finishFromText(
   text: string,
   device: { machineId: string; deviceId: string },
   deps: TraeLoginDeps,
-  pkce: TraePkce,
   traceId: string,
 ): Promise<SignInResult> {
   const looksLikeUrl = text.includes("?") || text.startsWith("http")
@@ -571,24 +569,172 @@ async function finishFromText(
       return { type: "failed", error: "这段地址不属于本次登录，请重新发起" }
     }
     try {
-      return signInResult(await completeSignIn(parsed.callback, device, deps, pkce))
+      return signInResult(await completeSignIn(parsed.callback, device, deps))
     } catch (error) {
       return { type: "failed", error: errorMessage(error) }
     }
   }
-  // A bare code: only the PKCE exchange can use it, and only with the
-  // verifier this sign-in kept.
+  return {
+    type: "failed",
+    error: "请粘贴浏览器最后停在的那一整串地址（含 ? 之后的参数），只给一段代码无法完成登录",
+  }
+}
+
+/**
+ * The callback page, one per plugin process.
+ *
+ * Every sign-in names the same address (`TRAE_CALLBACK_PORT`), so the page
+ * cannot belong to one sign-in: a tab left over from an earlier attempt, a
+ * browser that follows the console's redirect minutes later, a second sign-in
+ * started before the first was finished — all arrive at the same URL, and the
+ * `login_trace_id` the console echoes back says which attempt an answer is
+ * for.
+ *
+ * The page therefore outlives every sign-in it serves. That is the point: a
+ * listener that stops when the host stops waiting is exactly what produced
+ * `ERR_CONNECTION_REFUSED` for authorizations that had already succeeded. A
+ * pending sign-in is forgotten after `TRAE_PENDING_SIGN_IN_TTL_MS`, so an
+ * answer found much later is refused rather than redeemed against a device
+ * and a PKCE verifier this process no longer holds.
+ *
+ * A sign-in that is redeemed after its flow ended (`settled`) is saved by the
+ * page itself — see `saveLateSignIn`. Nothing else is watching by then.
+ */
+interface PendingSignIn {
+  /** The trace id the console was given, and the key this claim is held under. */
+  traceId: string
+  deps: TraeLoginDeps
+  log: VendorLogger
+  device: { machineId: string; deviceId: string }
+  settlement: Settlement<SignInResult>
+  startedAt: number
+}
+
+/** The process-wide callback page and the sign-ins it is holding. */
+interface CallbackHub {
+  server: PageServer
+  pending: Map<string, PendingSignIn>
+}
+
+/**
+ * Keyed by the host client: one plugin instance is handed one client, so this
+ * is "one page per plugin process" without the page being something a second
+ * instance (another host, another vendor's deps in a test) can claim from.
+ */
+const hubs = new WeakMap<PluginClient, CallbackHub>()
+const hubsStarting = new WeakMap<PluginClient, Promise<CallbackHub>>()
+
+async function callbackHub(client: PluginClient): Promise<CallbackHub> {
+  const existing = hubs.get(client)
+  if (existing?.server.listening === true) return existing
+  let starting = hubsStarting.get(client)
+  if (starting === undefined) {
+    starting = startHub(client)
+    hubsStarting.set(client, starting)
+  }
   try {
-    return signInResult(
-      await completeSignIn(
-        { refreshToken: "", accessToken: "", authCode: text, uid: "", nickname: "", enterpriseId: "" },
-        device,
-        deps,
-        pkce,
-      ),
-    )
+    return await starting
+  } finally {
+    hubsStarting.delete(client)
+  }
+}
+
+async function startHub(client: PluginClient): Promise<CallbackHub> {
+  const pending = new Map<string, PendingSignIn>()
+  const server = await PageServer.start(
+    async (request): Promise<PageResponse> => {
+      if (!request.path.endsWith(TRAE_CALLBACK_PATH)) return notFound()
+      const traceId = request.query.get("loginTraceID") ?? ""
+      // The console echoes the trace id we issued, and that is what says which
+      // attempt an answer belongs to. Its shape is the vendor's to change, so
+      // an answer that names none is still accepted **when there is only one
+      // sign-in it could be for** — refusing it would fail a legitimate
+      // sign-in over a parameter name this package does not control.
+      const byTrace = traceId.length > 0
+      const claim = byTrace
+        ? pending.get(traceId)
+        : pending.size === 1
+          ? pending.values().next().value
+          : undefined
+      if (claim !== undefined && Date.now() - claim.startedAt > TRAE_PENDING_SIGN_IN_TTL_MS) {
+        pending.delete(claim.traceId)
+        return expiredPage()
+      }
+      if (!carriesAnswer(request.query)) return waitingPage()
+      if (claim === undefined) return unknownSignInPage()
+      const page = await redeem(claim, request.query, { inferred: !byTrace })
+      // A claim matched by trace id belongs to this answer and is spent. One
+      // that was only *inferred* (the answer named no trace id) is a guess:
+      // when it fails, the guess was probably a stale tab's, so the claim is
+      // kept and the sign-in stays claimable by the answer still coming. A
+      // stale tab must not be able to kill the sign-in a person is waiting on.
+      if (byTrace || page !== undefined) pending.delete(claim.traceId)
+      return page ?? waitingPage()
+    },
+    { raw: true, port: TRAE_CALLBACK_PORT, unref: true },
+  )
+  const hub: CallbackHub = { server, pending }
+  hubs.set(client, hub)
+  return hub
+}
+
+/**
+ * An answer, turned into a sign-in. Runs on the page's behalf.
+ *
+ * `undefined` means "this answer was not this sign-in's": it is returned only
+ * for a guess that failed, and the caller keeps the claim (see the handler).
+ */
+async function redeem(
+  claim: PendingSignIn,
+  query: URLSearchParams,
+  options: { inferred: boolean } = { inferred: false },
+): Promise<PageResponse | undefined> {
+  const { inferred } = options
+  try {
+    const parsed = parseCallback(`/?${query.toString()}`)
+    if (!parsed.ok) {
+      // A malformed answer is only this sign-in's if it named its trace id.
+      // A guessed one is ignored, like any other answer that isn't ours.
+      if (inferred) {
+        await claim.log.warn(`一个不认识的回调被忽略了：${parsed.reason}`)
+        return undefined
+      }
+      claim.settlement.settle({ type: "failed", error: parsed.reason })
+      return donePage(parsed.reason)
+    }
+    // The host stops waiting after its own timeout; a browser can arrive well
+    // past it. The flow is over, so this page stores the account itself.
+    const late = claim.settlement.settled
+    const credential = await completeSignIn(parsed.callback, claim.device, claim.deps)
+    const result = signInResult(credential)
+    if (late) await saveLateSignIn(claim.deps, result, claim.log)
+    claim.settlement.settle(result)
+    return donePage("登录成功")
   } catch (error) {
-    return { type: "failed", error: errorMessage(error) }
+    const message = errorMessage(error)
+    await claim.log.warn(
+      inferred ? `一个不认识的回调被拒绝了（它没带 login_trace_id）：${message}` : `登录失败：${message}`,
+    )
+    // Guessed from a single pending sign-in, and wrong: this is not that
+    // sign-in's answer, so it is not failed on its behalf.
+    if (inferred) return undefined
+    claim.settlement.settle({ type: "failed", error: message })
+    return donePage(`登录失败：${message}`)
+  }
+}
+
+/**
+ * Forget sign-ins nobody came back for.
+ *
+ * The page lives as long as the host does, so an abandoned sign-in would
+ * otherwise be kept for the life of the process — each one holding a
+ * settlement, a device identity and a PKCE verifier. Called when a sign-in
+ * starts, which is the only moment the map grows.
+ */
+function prunePending(pending: Map<string, PendingSignIn>): void {
+  const cutoff = Date.now() - TRAE_PENDING_SIGN_IN_TTL_MS
+  for (const [key, claim] of pending) {
+    if (claim.startedAt < cutoff) pending.delete(key)
   }
 }
 
@@ -606,7 +752,6 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
       label: "浏览器登录",
       async authorize() {
         const device = newDevice()
-        const pkce = newPkce()
         const log = vendorLogger(deps.client, TRAE_ID)
         const settlement = createSettlement<SignInResult>()
 
@@ -616,52 +761,31 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
         // prefix therefore cannot be used here: the server serves the root
         // path, which is why `raw` exists (`core/local-page.ts`).
         const traceId = traceIdOf(device.machineId, device.deviceId)
-        const server = await PageServer.start(
-          async (request): Promise<PageResponse> => {
-            if (!request.path.endsWith(TRAE_CALLBACK_PATH)) return notFound()
-            // Nothing else on this machine is expected to post a credential
-            // here, and the console echoes the trace id we issued, so a
-            // mismatch is not ours. An absent one is accepted: the shape of the
-            // callback is the vendor's to change, and refusing it would hang
-            // the sign-in until the timeout instead of reporting a reason.
-            const echoed = request.query.get("loginTraceID")
-            if (echoed !== null && echoed !== traceId) return notFound()
-            // A request that carries no answer is not an answer. Browsers and
-            // the console page itself may touch this URL (a reachability
-            // probe, a reload, a favicon); treating one as "the callback"
-            // would fail the sign-in and close the server, and the real
-            // redirect — the one that arrives seconds later with the code —
-            // would hit a dead port (`ERR_CONNECTION_REFUSED`).
-            if (!carriesAnswer(request.query)) return waitingPage()
-            try {
-              const parsed = parseCallback(`/?${request.query.toString()}`)
-              if (!parsed.ok) {
-                settlement.settle({ type: "failed", error: parsed.reason })
-                return donePage(parsed.reason)
-              }
-              const credential = await completeSignIn(parsed.callback, device, deps, pkce)
-              settlement.settle(signInResult(credential))
-              return donePage("登录成功")
-            } catch (error) {
-              const message = errorMessage(error)
-              await log.warn(`登录失败：${message}`)
-              settlement.settle({ type: "failed", error: message })
-              return donePage(`登录失败：${message}`)
-            }
-          },
-          { raw: true },
-        )
+        // The page belongs to the process, not to this sign-in: that is what
+        // makes the address the same every time, and what keeps a slow
+        // browser hop from landing on a port nobody is listening to. The
+        // trace id decides which attempt an answer belongs to.
+        const shared = await callbackHub(deps.client)
+        prunePending(shared.pending)
+        shared.pending.set(traceId, { traceId, deps, log, device, settlement, startedAt: Date.now() })
+        const callbackUrl = new URL(TRAE_CALLBACK_PATH.replace(/^\//, ""), shared.server.url).toString()
+        // Worth a line when the preferred port was taken: the address a stale
+        // browser tab holds then has nothing behind it.
+        if (new URL(callbackUrl).port !== String(TRAE_CALLBACK_PORT)) {
+          await log.info(`回调端口 ${TRAE_CALLBACK_PORT} 被占用，本次登录改用 ${new URL(callbackUrl).port}`)
+        }
 
         const timer = setTimeout(() => {
-          void log.warn("登录超时，已关闭本地回调页")
+          // The page keeps listening and the sign-in stays claimable, so a
+          // browser that arrives after this still finishes it (`redeem` saves
+          // it itself). The host is only told that its own wait is over.
+          void log.warn("登录超时；回调页仍在监听，浏览器稍后回来仍可完成登录")
           settlement.settle({ type: "failed", error: "登录超时，请重新发起" })
-          server.close()
         }, deps.timeoutMs ?? TRAE_SIGN_IN_TIMEOUT_MS)
         timer.unref?.()
 
-        const callbackUrl = new URL(TRAE_CALLBACK_PATH.replace(/^\//, ""), server.url).toString()
         return {
-          url: buildLoginUrl(device.machineId, device.deviceId, callbackUrl, pkce),
+          url: buildLoginUrl(device.machineId, device.deviceId, callbackUrl),
           instructions: "在浏览器中完成 TRAE 授权，页面会自动完成登录",
           method: "auto",
           /**
@@ -677,14 +801,22 @@ export function loginMethods(deps: TraeLoginDeps): AuthMethod[] {
             const text = typeof pasted === "string" ? pasted.trim() : ""
             if (text.length > 0) {
               clearTimeout(timer)
-              server.close()
-              return await finishFromText(text, device, deps, pkce, traceId)
+              shared.pending.delete(traceId)
+              return await finishFromText(text, device, deps, traceId)
             }
+            // The page is not closed when this returns. Closing it the moment
+            // the host stops waiting is what turns a slow-but-real
+            // authorization into `ERR_CONNECTION_REFUSED` in the browser: the
+            // console had already handed the answer to a page that was gone.
             try {
               return await settlement.promise
             } finally {
               clearTimeout(timer)
-              server.close()
+              // The attempt is **not** forgotten here. A host that stopped
+              // waiting — its own timeout, a closed window — is exactly the
+              // case where the browser still arrives later, and the claim is
+              // what lets that answer be redeemed (`redeem` deletes it when
+              // it does, the TTL when nobody comes).
             }
           },
         }

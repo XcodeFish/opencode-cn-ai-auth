@@ -409,43 +409,95 @@ provider 账号的接口（`getAuth` 就是 `readAuth()[key]`，key 是本 provi
 
 ### 登录
 
-浏览器授权 + **本机回环回调**（`src/vendors/trae/login.ts`）。插件先起一个一次性本地页
-（`core/local-page.ts`，绑 `127.0.0.1:0`，URL 带随机前缀），把回调地址作为
-`auth_callback_url` 参数发给 `www.trae.cn/authorization`，用户在浏览器完成授权后浏览器被
-重定向回本地页，插件在那一跳里换凭据。
+浏览器授权 + **本机回环回调**（`src/vendors/trae/login.ts`）。插件先起一个本地页
+（`core/local-page.ts`，绑回环），把回调地址作为 `auth_callback_url` 参数发给
+`www.trae.cn/authorization`，用户在浏览器完成授权后浏览器被重定向回本地页，插件在
+那一跳里换凭据。回调地址的形状是固定的 —— 控制台用
+`^http://127\.0\.0\.1:(\d+)/authorize$` 校验它，所以要落在根路径 `/authorize`
+（`PageServer` 的 `raw` 模式）；端口则由我们挑，**首选 18080**（厂商自己客户端的端口，
+JetHub 的 `TRAE_CALLBACK_PORT`），被占用时退到系统分配的空端口 —— 登录 URL 用实际
+监听到的端口重算，控制台原样回跳，所以退端口不影响可用性（JetHub 记录过：早期实现
+直接 `listen(18080)`，被占用时整进程崩）。
 
-三个曾经让流程「卡在授权中」的点，都是参数或形态写错：
+两个曾经让流程「卡在授权中」的参数错误，留在这里备查：回调参数名是
+**`auth_callback_url`**（`callback_url` / `redirect_uri` 会被忽略）；
+`auth_from` / `login_channel` / `auth_type` / `redirect` 决定走哪条分支，缺了就到不了
+本机回传那一步。
 
-- 回调参数名是 **`auth_callback_url`**；`callback_url` / `redirect_uri` 会被忽略。
-- 回调可能**直接回传 token**（`refreshToken` + `userInfo` / `userJwt` 两个 URL 编码
-  JSON），也可能回一个**授权码**（`authCodeInfo.AuthCode`）——两条都要认，见下。
-- 回传授权码时，必须用**本次登录自己生成的 PKCE 校验串**去换取令牌。
+### 不带 `code_challenge`：控制台有两条流程，本包必须走刷新令牌那条（0.8.1）
 
-#### PKCE 是当前客户端唯一的通道（2026-10-16 定位）
+0.7.1 给登录 URL 加上了 `code_challenge` + `code_challenge_method=S256`，理由是「官方客户端
+用 PKCE，少了它就切到不再签发令牌的老分支」。**这条推理是错的，而且它本身就是后面所有
+失败的根因**，所以在这里留下纠正：
 
-用户报障「点登录就显示登录失败 / 网络错误，请刷新页面重试」。这是**控制台自己的页面**
-给出的状态，不是本机回调页：把那串 URL 交给无头 Chrome 跑一遍可以确认控制台只会在
-`GetRefreshToken` / `ExchangeToken` 成功之后才 `window.location.href` 跳到我们的回调，
-所以那个错误发生时本机一个请求都没收到（探针实测：0 个请求）。
+控制台页面用「有没有 `code_challenge`」**挑选流程**（`page.…js`：`er` = 两个参数都在；
+`eT` 里 `if(er){…TraeGetPCAuthCode…} else {…GetRefreshToken…}`）。带上它，页面走
+`TraeGetPCAuthCode`，回调变成 `?authCodeInfo={AuthCode:…}`，而换令牌要用
+`{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}` 打
+`/trae/api/v3/oauth/ExchangeToken`。这个 body 从本包复现不出来：把官方客户端
+（`/Applications/Trae CN.app`，`out/main.js` 的 `exchangeTokenByAuthCode`）的原样字段
+逐一填上，服务端仍然回 `10101 无效参数`；不带参数、换字段名、换 client_id、换
+PlatformCode 也一样。也就是说 **0.7.1 之后本包的登录在「换令牌」这一步必然失败**。
 
-对照本机安装的官方客户端（`/Applications/Trae CN.app`，1.107.1，`product.json`）后，
-差异是**它走 PKCE，而我们走的是老流程**：
+对照两个能用的实现：JetHub（`src/trae-oauth.ts` 的 `buildTraeLoginURL`，17 个参数，
+**没有** `code_challenge`）和插件市场的 `@magpie-community/opencode-trae-auth`
+（`SITES["trae-cn"]`，同样只有 `auth_callback_url` / `login_channel` / `auth_type` 这几个）。
+两者都走刷新令牌那条：回调直接带 `refreshToken`，换令牌打
+`POST {host}/cloudide/api/v3/trae/oauth/ExchangeToken`，体
+`{ClientID, RefreshToken, ClientSecret:"-", UserID:""}`。
 
-| 项 | 官方客户端 | 本包（修复前，抄自 JetHub） |
-|---|---|---|
-| 授权参数 | `code_challenge` + `code_challenge_method=S256` | **没有** |
-| `plugin_version` | `tronBuildVersion` = `2.3.91092` | `2.3.62834` |
-| `x_app_version` | `appVersion` = `3.4.2` | `0.1.52` |
-| `client_id` | `authConfig.SOLO.stable` = `en1oxy7wnw8j9n` | 同值（这一项没错） |
-| 换令牌 | `POST {host}/trae/api/v3/oauth/ExchangeToken`，体 `{ClientID, AuthCode, CodeVerifier, IDEVersion}` | 走 `cloudide/...` 的 refreshToken 老端点 |
+实测两种形状被服务端接受的程度（假令牌，2026-10-16）：
 
-少了 `code_challenge` 时，控制台页面走到它那条老分支（`GetRefreshToken` → 用 refresh
-token 换令牌），而这条分支现在会失败——页面把任何失败都渲染成同一句「请检查是否开启了
-网络代理」，所以看起来像网络问题。本包现在按官方客户端构造 URL 并发起 PKCE 换取；老的
-refreshToken 回调仍然认，作为兜底。
+| 形状 | 回答 |
+|---|---|
+| `{ClientID, AuthCode, CodeVerifier[, DeviceInfo], IDEVersion}` | `400 10101 无效参数：{__Message.field}.`（参数形状就不对） |
+| `{ClientID, RefreshToken, ClientSecret, UserID}` | `401 20101 Token 无效：refresh token is invalid.`（形状对，只是令牌假） |
 
-`IDEVersion` 用官方客户端的 `appVersion`（3.4.2）而不是 `0.1.52`：后者是 JetHub 时代
-抄来的构建号。
+所以 0.8.1 起登录 URL **不带 PKCE**，回到刷新令牌那条；回调里真出现 `authCodeInfo`
+（上游改流程）时，本包**不发请求**、如实说明走的是另一条流程并请用户重试，而不是把
+一个已知会被拒的 body 打出去。
+
+**重新核对 0.7.1 的结论**：那时看到的「登录失败 / 网络错误」是控制台**页面**的错误屏，
+0.7.2 定位到的真实成因是回调地址形状（必须 `^http://127\.0\.0\.1:(\d+)/authorize$`）。
+PKCE 与那条屏的因果关系没有被单独验证过 —— 无头 Chrome 对照实验（2026-10-16）显示：
+同一串参数，带与不带 `code_challenge`，登录界面渲染完全一样。换句话说 0.7.2 才是那次
+修复，PKCE 是搭车进来的、并且是错的。
+
+### 回调页属于进程，不属于某一次登录（0.8.1，用户第二次报障）
+
+用户第二次报障仍是同一屏：授权成功、回调地址里带着 `authCodeInfo`，浏览器却显示
+`ERR_CONNECTION_REFUSED`。定位到的机制不是协议，而是**时序**：
+
+1. 宿主 `plugin login` 只在**本次等待**期间让插件活着；`callback` 一返回，这条流程
+   就结束了。
+2. 0.8.0 的 `callback` 在 `finally` 里 `server.close()`，**没有延时**：用户要是慢一点
+   （或者在授权页停留超过等待窗口），那一下回来打到的就是已经关掉的端口。
+3. 每次 `authorize()` 又各自起一个**随机端口**，所以第二次点登录会换地址：浏览器里
+   还开着的那张旧标签页回跳时，地址已经没人认了。
+
+修法是把页面的归属换个层级 —— **一个插件进程一个回调页**：
+
+- **地址固定**：进程内共享 `PageServer`（`callbackHub()`），端口首选 `TRAE_CALLBACK_PORT`
+  （18080，JetHub 同款；被占用则退一个空端口），路径固定 `/authorize`。两次登录
+  的回调地址因此完全一样。
+- **`login_trace_id` 认领**：哪个地址属于哪次登录由控制台回传的 trace id 决定
+  （`pending` 表），所以旧标签页、迟到的回跳都能落到正确的那次尝试上；认不出的
+  trace id 给一页「这次授权已经过期，请重新发起」，而不是 404。
+- **没有 trace id 时只是「猜测」**：参数形状是厂商的，控制台若某天不回
+  `loginTraceID`，只有一次登录在等就直接算它的；猜错（换令牌失败）时把那一次
+  放回去、登录继续等 —— 一次在真实 magpie 上跑出来的缺陷正是「旧标签页带着作废
+  的授权码回来，把正在等的登录顶成 401」。两次登录同时等待时没有 trace id 无法
+  区分，宁可给一页「请重新发起」，也不押一个。
+- **页面不随流程关闭**：`callback` 返回后页面继续监听（进程活着就活着），
+  迟到的回跳仍然有人接。
+- **迟到也落盘**：宿主已经不再等待时，回调页自己把账号写进 `client.auth.set`
+  （`saveLateSignIn`）—— 否则那一跳只是把凭据丢掉，用户还得再登一次。
+
+认领有 TTL（`TRAE_PENDING_SIGN_IN_TTL_MS`，15 分钟）：过期的答案不再兑换 —— 那个
+device 与 PKCE verifier 已经不在了。监听器 `unref`，不会拖住宿主进程退出。
+
+顺带每条到达 `/authorize` 的请求都写一条日志（可达 / 已带答案），下次「登录没反应」
+有据可查，不必再猜网络。
 
 #### 回调地址的形状也是硬约束（同一批实测）
 
@@ -479,9 +531,9 @@ JetHub 一直用的是根路径 `/authorize`；本包曾把它改成带随机前
   带着答案的请求（`authCodeInfo` / `code` / `refreshToken` / `userJwt` / `error_code` …）
   才算数，其它一律回一页「等待浏览器完成授权」并继续等。
 - **宿主提供的粘贴兜底没被用上**。`magpie plugin login` 会提示「把浏览器最后停在的整个
-  地址粘回来」，而本包此前忽略 `callback` 的参数。现在粘贴回来的整串地址（或一枚裸
-  授权码）会当作一次真实回调处理，仍然校验 `loginTraceID`；浏览器到不了回环地址不再是
-  死路。
+  地址粘回来」，而本包此前忽略 `callback` 的参数。现在粘贴回来的整串地址会当作一次
+  真实回调处理，仍然校验 `loginTraceID`；浏览器到不了回环地址不再是死路。只给一段
+  代码则明确要求整串地址 —— 答案就在 URL 里，猜一个片段等于拿真实凭据去赌。
 
 另外，控制台拒绝授权时会用 `error_code` / `error_msg` 回传（例如设备数超限），现在如实
 显示成「控制台拒绝了这次授权（code=20401）：…」，而不是含糊的「回调未携带登录凭据」。

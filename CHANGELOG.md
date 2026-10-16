@@ -2,6 +2,39 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.8.1] - 2026-10-16
+
+### Fixed
+
+- **登录必然失败：0.7.1 加的 PKCE 把控制台切到了本包换不了令牌的那条流程**。
+  控制台用「有没有 `code_challenge`」**挑选流程**：带上它，回调变成
+  `?authCodeInfo={AuthCode:…}`，换令牌要用 `{ClientID, AuthCode, CodeVerifier,
+  DeviceInfo, IDEVersion}` 打 `/trae/api/v3/oauth/ExchangeToken` —— 这个 body 从本包
+  复现不出来（照官方客户端 `exchangeTokenByAuthCode` 逐字段填，服务端仍回
+  `10101 无效参数`；换字段名 / client_id / PlatformCode 也一样）。JetHub 与插件市场的
+  `@magpie-community/opencode-trae-auth` 都**不带 PKCE**，走回调直带 `refreshToken`、
+  打 `POST {host}/cloudide/api/v3/trae/oauth/ExchangeToken`（体
+  `{ClientID, RefreshToken, ClientSecret, UserID}`）那条 —— 形状被接受（假令牌回
+  `20101` 而不是 `10101`）。现在登录 URL 不带 PKCE，回到这条路；真收到 `authCodeInfo`
+  时**不发请求**，如实说明并请用户重试。0.7.1 的推理与 0.7.2 的定位见
+  `docs/vendors.md` §4：那次真正修好问题的是 0.7.2（回调地址形状），PKCE 是错的搭车项。
+- **回调页在宿主放弃等待时就关了，于是慢一点的授权变成 `ERR_CONNECTION_REFUSED`**。
+  `callback` 以前在 `finally` 里立刻 `server.close()`：用户只要在授权页多停一会儿，
+  回跳就打到一个已经没人监听的端口。现在页面不随流程关闭，迟到的回调照样完成登录；
+  如果宿主已经不再等待，回调页**自己把账号写进 `client.auth.set`**，不必再登一次。
+- **回调页现在属于插件进程，而不是某一次登录**：地址固定（端口首选 18080，即厂商
+  客户端的端口，JetHub 同款；被占用则退一个空端口），`login_trace_id` 决定一跳属于
+  哪次尝试。以前每次 `authorize()` 都起一个随机端口、又在自己的流程结束时关掉它，
+  所以第二次点登录会换地址，浏览器里那张旧标签页回跳必然打到死端口。认不出的
+  trace id 给一页「这次授权已过期，请重新发起」，而不是 404。
+- 没有 `login_trace_id` 的回调按**猜测**处理：只有一次登录在等就直接算它的；猜错
+  （旧标签页那枚已作废的令牌换不到令牌）时把这次登录放回去继续等，而不是被一张
+  僵尸标签页顶成失败 —— 这个缺陷是在真实 magpie 上跑出来的。两次登录同时等待时
+  没有 trace id 无法区分，宁可给一页「请重新发起」，也不押一个。
+- 认领有 TTL（15 分钟），过期的答案不再兑换；监听器 `unref`，不会拖住进程。
+- 每次到达 `/authorize` 的请求都写一条日志（可达 / 已带答案），下次「登录没反应」
+  有据可查，不必猜网络。
+
 ## [0.8.0] - 2026-10-16
 
 ### Changed

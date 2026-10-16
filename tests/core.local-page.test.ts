@@ -124,4 +124,47 @@ describe("PageServer", () => {
     )
     expect(failure).toBeInstanceOf(Error)
   })
+
+  /**
+   * 端口是「偏好」而不是「要求」：Trae 的回调地址里写着端口，而 18080
+   * 正是厂商自己客户端用的那个 —— 被占用是常态，这时必须退到随便一个
+   * 空端口继续，而不是让登录失败（JetHub 的记录：早期实现直接
+   * `server.listen(18080)`，被占用时整进程崩）。
+   */
+  test("首选端口被占用时回退到空端口，而不是失败", async () => {
+    const first = await PageServer.start(() => ({ body: "first" }), { raw: true, port: 0 })
+    const taken = Number(new URL(first.url).port)
+    try {
+      const second = await PageServer.start(() => ({ body: "second" }), { raw: true, port: taken })
+      try {
+        expect(Number(new URL(second.url).port)).not.toBe(taken)
+        expect(await (await fetch(second.url)).text()).toBe("second")
+      } finally {
+        second.close()
+      }
+      // 首选端口仍然属于第一个服务器，没有被抢走。
+      expect(await (await fetch(first.url)).text()).toBe("first")
+    } finally {
+      first.close()
+    }
+  })
+
+  test("首选端口空闲时就用它", async () => {
+    const free = await freePort()
+    const server = await PageServer.start(() => ({ body: "ok" }), { raw: true, port: free })
+    try {
+      expect(Number(new URL(server.url).port)).toBe(free)
+      expect((await fetch(server.url)).status).toBe(200)
+    } finally {
+      server.close()
+    }
+  })
 })
+
+/** 一个此刻空闲的回环端口（先绑定再释放，供「首选端口生效」那条判断用）。 */
+async function freePort(): Promise<number> {
+  const probe = await PageServer.start(() => ({ body: "" }), { raw: true })
+  const port = Number(new URL(probe.url).port)
+  probe.close()
+  return port
+}

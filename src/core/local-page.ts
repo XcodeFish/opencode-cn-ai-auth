@@ -54,6 +54,25 @@ export interface PageServerOptions {
    * issued.
    */
   raw?: boolean
+  /**
+   * A loopback port to prefer, `0` (the default) for any free one.
+   *
+   * A flow whose callback address must stay the same across attempts — Trae's
+   * console hands the browser back to whatever address it was given, so a
+   * later attempt or a tab left over from an earlier one lands on the port it
+   * names — wants a stable number. It is a preference, not a requirement:
+   * the port is likely taken (the vendor's own app uses it) and the address
+   * is ours to choose, so a busy one falls back to an ephemeral port instead
+   * of failing the sign-in.
+   */
+  port?: number
+  /**
+   * Leave the listener out of the event loop's refs, so an idle server does
+   * not keep a process alive on its own. A flow that keeps its page open
+   * beside a long-lived host (see `vendors/trae/login.ts`) wants this; a
+   * one-shot page does not care.
+   */
+  unref?: boolean
 }
 
 export class PageServer {
@@ -65,19 +84,19 @@ export class PageServer {
     readonly url: string,
   ) {}
 
+  /** Whether the page still accepts connections. */
+  get listening(): boolean {
+    return !this.closed
+  }
+
   static async start(handler: PageHandler, options: PageServerOptions = {}): Promise<PageServer> {
     // `raw` keeps an empty prefix, so `handle` matches the origin root.
     const token = options.raw === true ? "" : randomHex(16)
     const server = createServer((request, response) => {
       void handle(handler, token, request, response)
     })
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject)
-      server.listen(0, "127.0.0.1", () => {
-        server.off("error", reject)
-        resolve()
-      })
-    })
+    await listenWithFallback(server, options.port ?? 0)
+    if (options.unref === true) server.unref?.()
     const address = server.address()
     if (address === null || typeof address === "string") {
       server.close()
@@ -94,6 +113,42 @@ export class PageServer {
     this.server.closeAllConnections?.()
     this.server.close()
   }
+}
+
+/**
+ * Listen on `preferred`, or on any free port when it is taken.
+ *
+ * A taken port is the expected case, not an error: the vendor's own client
+ * binds the same number, and a sign-in must not fail because something else
+ * (or an earlier run of this plugin) got there first. Only the two codes that
+ * mean "this number is not available" fall back; anything else (no
+ * permission for a privileged port, a broken socket) is raised to the caller.
+ *
+ * The listener keeps an `error` handler for the rest of its life: with none,
+ * a socket error after `listen` succeeded — `EMFILE`, a peer that vanished —
+ * is a process-level crash of the whole host, which is a harsh price for one
+ * page server's connection.
+ */
+async function listenWithFallback(server: Server, preferred: number): Promise<void> {
+  try {
+    await listenOn(server, preferred)
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    if (preferred === 0 || (code !== "EADDRINUSE" && code !== "EACCES")) throw error
+    await listenOn(server, 0)
+  }
+  server.on("error", () => {})
+}
+
+function listenOn(server: Server, port: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error)
+    server.once("error", onError)
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", onError)
+      resolve()
+    })
+  })
 }
 
 async function handle(

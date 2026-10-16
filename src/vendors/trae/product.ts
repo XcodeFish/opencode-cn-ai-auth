@@ -178,6 +178,34 @@ export const TRAE_SIGN_IN_TIMEOUT_MS = 10 * 60 * 1000
 export const TRAE_CALLBACK_PATH = "/authorize"
 
 /**
+ * The loopback port the sign-in asks for first.
+ *
+ * The address is ours to choose and the console echoes it back, so the port
+ * does not have to be this one — but a number that stays the same is worth
+ * having: the callback page is **one long-lived page per plugin process**
+ * (`login.ts`'s hub), so every sign-in this process starts names the same
+ * address, a browser tab left over from an earlier attempt still reaches a
+ * listener, and the trace id decides which attempt the answer belongs to.
+ * The vendor's own client uses this number (`JetHub`'s `TRAE_CALLBACK_PORT`,
+ * `trae-oauth.ts`). A taken port is not an error: `PageServer` falls back to
+ * any free one.
+ */
+export const TRAE_CALLBACK_PORT = 18080
+
+/**
+ * How long a sign-in stays claimable after it stopped being waited for.
+ *
+ * The console can send the browser back at any time, including after the host
+ * has given up waiting. The callback page is not the thing that ends — it
+ * runs for as long as the process does — so what expires is the *answer*:
+ * past this, a trace id nobody remembers any more is refused, which keeps a
+ * browser tab found hours later from being redeemed against a device and a
+ * PKCE verifier nobody has. Fifteen minutes covers a slow sign-in several
+ * times over; anything older was abandoned.
+ */
+export const TRAE_PENDING_SIGN_IN_TTL_MS = 15 * 60 * 1000
+
+/**
  * Business code for "today's check-in already exists" and for "the check-in
  * pool is momentarily empty".
  *
