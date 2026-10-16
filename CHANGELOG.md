@@ -2,6 +2,30 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.8.0] - 2026-10-16
+
+### Changed
+
+- **TRAE 的 provider id 由 `trae` 改为 `trae-cn`，为的是直接吃下插件市场里既有的 TRAE CN
+  登录。** magpie 的登录态按 provider id 存（`plugin-auth.json` 的 `trae-cn` /
+  `trae-cn#<slot>`），一个 provider 由哪个插件服务是可选的
+  （`magpie plugin use` 写进 `plugins.json` 的 `prefer`）。`@magpie-community/opencode-trae-auth`
+  用的正是 `trae-cn`，而它存下来的字段（`access` / `refresh` / `expires` / `accountId` /
+  `uid` / `deviceId` / `machineId`）与本包 `session.ts` 读的那一组一致，所以那边的
+  账号在本包这里**不用迁移、不用重新登录**，设备指纹也原样保留（签到按设备限次，
+  这一点关键）。装上本包后跑一次
+  `magpie plugin use opencode-cn-ai-auth trae-cn`（或在插件页改「服务方」）即可由本包服务。
+  宿主没有读别的 provider 账号的接口，因此除 id 对齐外没有第二条零复制的通路；账号永远
+  留在 `plugin-auth.json` 里，与插件装不装无关。
+
+### 迁移
+
+- **0.7.x 登录过的 `trae` 账号需要重新登录一次**（`magpie plugin login trae-cn`）：id 换了，
+  旧账号不再被读取。若你此前用上面那家社区插件登录过 Trae CN，则无需重新登录。
+- OpenCode 侧同理由 `trae` 改为 `trae-cn`：`options` 与子入口路径
+  （`opencode-cn-ai-auth/opencode/trae`）不变，模型引用从 `trae/<模型>` 改为
+  `trae-cn/<模型>`。
+
 ## [0.7.3] - 2026-10-16
 
 ### Fixed

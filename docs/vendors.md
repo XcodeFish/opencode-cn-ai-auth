@@ -343,8 +343,31 @@ checkin`、Settings › Daily check-in › Plugins 的自动开关，三者都�
 
 ## 4. TRAE（字节跳动）
 
-`provider id = trae`，显示名 `TRAE (字节)`。**第一版只做国内版客户端**：JetHub 另有一个
+`provider id = trae-cn`，显示名 `TRAE (字节)`。**第一版只做国内版客户端**：JetHub 另有一个
 国际版（`trae-intl`，域名与 client_id 都不同），本包暂不接入，理由见 §5 未验证边界。
+
+### provider id 与既有 TRAE 插件的登录迁移
+
+magpie 的登录态**按 provider id 存**：`~/.config/magpie/plugin-auth.json` 里第一个账号占
+`trae-cn`，第二个起是 `trae-cn#<slot>`（`internal/plugin/host.js` 的 `accountsOf`）；请求、
+`getAuth()`、`loader` 都在「这个 provider 的这个账号」作用域里跑，宿主**没有**读别的
+provider 账号的接口（`getAuth` 就是 `readAuth()[key]`，key 是本 provider 的账号键）。
+而一个 provider 由**哪个插件服务**是可选的：`magpie plugin use <插件> <provider>` 把它记进
+`plugins.json` 的 `prefer`，两个插件声明同一个 id 时，一个负责登录、一个负责服务。
+
+于是「magpie 里已有的 TRAE CN 登录能不能一键迁移」的答案就是 id 是否相同。既有的
+`@magpie-community/opencode-trae-auth`（0.2.14）登录的正是 `trae-cn`（国际版为
+`trae-global`），它存下来的字段是
+`access` / `refresh` / `expires` / `accountId` / `uid` / `deviceId` / `machineId`（另有
+`clientId` / `api` / `host` / `authHost` / `region` / `account` 等本包不读的字段），与本包
+`session.ts` 读的那一组一致——所以本包声明 `trae-cn` 之后，那家插件登录过的账号直接可用，
+连设备指纹都是同一个（签到是按设备限次的，这一点重要）。magpie 自己的
+`plugin move`（内置 `zcode` / `workbuddy` 订阅转社区插件、账号仍留在同名 id 下）就是同一
+套机制。
+
+代价与边界写在这里：0.7.x 的 `trae` 账号（本包自己对国内版的旧 id）不会被读取，需要重新
+登录一次；反过来，装了那家插件时想由本包服务 `trae-cn`，要么跑一次
+`magpie plugin use opencode-cn-ai-auth trae-cn`，要么在插件页里改「服务方」。
 
 这一家与另两家的根本区别：**Trae 不是 OpenAI 兼容通道**。Loomy / Raccoon 只需注入请求头
 （Raccoon 再加一个 `extra_body` 字段），协议转换由宿主完成；Trae 的请求体与流式响应都要

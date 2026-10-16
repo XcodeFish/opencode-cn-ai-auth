@@ -308,8 +308,14 @@ Loomy 的当日上限只有签到应答会说，因此签到与 usage 都把它�
 | npm 包名（发布时） | `@magpie-community/opencode-cn-ai-auth` | 社区 registry 与发现机制用 |
 | 独立仓库/目录 | `opencode-cn-ai-auth` | 本地开发用裸名 |
 | 社区 monorepo 目录 | `packages/cn-ai` | 跟随短名 |
-| provider id | `loomy`、`raccoon` | 写进账号 key（`<id>/<accountId>`），一旦发布不可随意改 |
+| provider id | `loomy`、`raccoon`、`trae-cn` | 写进账号 key（`<id>/<accountId>`），一旦发布不可随意改 |
 | 日志 service | `cn-ai` | `core/log.ts` 统一写 |
 
 provider id 是账号归属与模型 `providerID` 的一部分，改名等于让所有已登录账号失联；
 新增厂商只**追加** id 与导出，不动既有的。
+
+唯一的例外是发布前照抄既有插件的 id：`trae-cn` 取的是插件市场里
+`@magpie-community/opencode-trae-auth` 正在用的 id（它也登录 Trae CN），这样在那家插件
+里登录过的账号，本包装上就直接是登录态，不必重新登录（magpie 的 `prefer` +
+`plugin use` 决定由谁服务，见 `docs/vendors.md` §4）。0.7.x 自己的 `trae` 账号因此失联，
+是一次有意的改名。

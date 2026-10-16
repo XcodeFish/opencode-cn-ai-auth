@@ -84,7 +84,7 @@ const CREDENTIAL_OPTIONS = {
 
 describe("OpenCode Trae 入口", () => {
   test("遵守 V2 的 id/setup 契约，且不导出 server", () => {
-    expect(traeEntry.id).toBe("trae")
+    expect(traeEntry.id).toBe("trae-cn")
     expect(typeof traeEntry.setup).toBe("function")
     expect("server" in traeEntry).toBe(false)
   })
@@ -93,7 +93,7 @@ describe("OpenCode Trae 入口", () => {
     const fake = fakeContext(CREDENTIAL_OPTIONS)
     await traeEntry.setup(fake.context)
     expect(fake.added).toHaveLength(1)
-    expect(at(fake.added, 0).info.id).toBe("trae")
+    expect(at(fake.added, 0).info.id).toBe("trae-cn")
     expect(at(fake.added, 0).models.length).toBeGreaterThan(0)
     const names = fake.hooks.map((hook) => hook.name).sort()
     expect(names).toStrictEqual(["http.request", "http.response"])

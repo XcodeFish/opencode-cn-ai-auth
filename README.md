@@ -8,7 +8,14 @@ Raccoon（商汤小浣熊）与 TRAE（字节跳动），共享同一套协议�
 |---|---|---|---|
 | `loomy` | Loomy（讯飞） | 8 | 微信扫码 / 短信验证码 |
 | `raccoon` | Raccoon（商汤小浣熊） | 6 | 微信扫码 / 短信验证码 |
-| `trae` | TRAE（字节跳动） | 17 | 浏览器授权（本机回环回调） |
+| `trae-cn` | TRAE（字节跳动，国内版） | 17 | 浏览器授权（本机回环回调） |
+
+`trae-cn` 这个 id 是照着插件市场里既有的
+[`@magpie-community/opencode-trae-auth`](https://www.npmjs.com/package/@magpie-community/opencode-trae-auth)
+取的：magpie 把登录态按 provider id 存（`~/.config/magpie/plugin-auth.json` 里的
+`trae-cn` / `trae-cn#<slot>`），**谁声明这个 id 谁就服务它**。所以在那家插件里登录过
+的账号，本包装上就能直接用，不需要重新登录、也不复制凭据——设备指纹原样保留。
+详见 [§从社区 TRAE 插件接过来](#从社区-trae-插件接过来)。
 
 TRAE 与另两家有一处根本差别：**它不是 OpenAI 兼容通道**。请求体要转成 SOLO 格式，
 响应要从 SOLO 私有 SSE 转回 OpenAI chunk，两件事都由本包在 `loader.fetch` 里做
@@ -27,9 +34,24 @@ TRAE 与另两家有一处根本差别：**它不是 OpenAI 兼容通道**。请
 
 ```sh
 magpie plugin add <包的路径或名字>
-magpie plugin login loomy    # 或 raccoon / trae
+magpie plugin login loomy    # 或 raccoon / trae-cn
 magpie plugin --json         # 看加载状态
 ```
+
+### 从社区 TRAE 插件接过来
+
+如果你已经在 `@magpie-community/opencode-trae-auth` 里登录过 Trae CN（provider id
+`trae-cn`），本包装上后**那条登录就是本包的**，一条命令把服务权接过来即可：
+
+```sh
+magpie plugin use opencode-cn-ai-auth trae-cn   # 由本包服务 trae-cn
+magpie plugin --json                            # trae-cn 下面应显示 signed in
+```
+
+两家的登录态字段一致（`access` / `refresh` / `expires` / `accountId` / `uid` /
+`deviceId` / `machineId`），magpie 也允许一个 provider 同时由两个插件声明——一个负责
+登录、一个负责服务；登录态留在 `plugin-auth.json` 的 `trae-cn` 名下，与插件装不装无关，
+所以之后删掉另一家插件，账号也不会丢。
 
 ### OpenCode
 
@@ -55,7 +77,8 @@ token；二维码/短信登录会在 OpenCode 的本地登录页完成，凭据�
 `officeIdentity`。Magpie 的完整额度卡片和签到能力只在 Magpie host 中生效；Raccoon
 的自动续期只对返回 refresh token 的登录生效。
 
-TRAE 使用 `opencode-cn-ai-auth/opencode/trae`：
+TRAE 使用 `opencode-cn-ai-auth/opencode/trae`（子入口文件名仍叫 `trae`，它注册的
+provider id 与 Magpie 侧一致，都是 `trae-cn`）：
 
 ```jsonc
 {
@@ -87,7 +110,8 @@ OpenCode 提供 `http.request` / `http.response` 两个 hook，且两者都要�
 `plugin` 配置及函数/`server` 入口不支持，需升级宿主或改用包根的 Magpie 入口。
 
 Magpie 仍然从包根入口 `index.ts` 加载各厂商的插件工厂；根入口和三个 OpenCode 子入口
-（`loomy` / `raccoon` / `trae`）都会随 npm 包发布。**签到仍只在 Magpie 侧**：OpenCode
+（`loomy` / `raccoon` / `trae`）都会随 npm 包发布，各自注册的 provider id 与 Magpie 侧
+一致（TRAE 为 `trae-cn`）。**签到仍只在 Magpie 侧**：OpenCode
 不消费 `auth.checkin`，所以那边没有一键签到的入口。
 
 ## 登录

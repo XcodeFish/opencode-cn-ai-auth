@@ -28,7 +28,26 @@
 import type { ModelSpec } from "../../core/models.ts"
 import type { TraeHeaderConstants } from "./api.ts"
 
-export const TRAE_ID = "trae"
+/**
+ * The provider's id, and why it is `trae-cn` rather than `trae`.
+ *
+ * magpie keeps a sign-in under the **provider id** — `plugin-auth.json` holds
+ * `trae-cn`, then `trae-cn#<slot>` for a second account — and a provider is
+ * served by whichever installed plugin declares that id (magpie's
+ * `plugin use <name> <provider>`, kept as `prefer` in `plugins.json`). So the
+ * id is the whole of "已有登录直接可用": declare the id the other Trae plugin
+ * signs in to and its accounts are already there, with nothing copied.
+ *
+ * The community package `@magpie-community/opencode-trae-auth` signs in to
+ * Trae CN as `trae-cn` (and Trae international as `trae-global`) and keeps the
+ * same field set this vendor reads — `access` / `refresh` / `expires` /
+ * `accountId` / `uid` / `deviceId` / `machineId` — so an account it created
+ * works here unchanged, device fingerprint included. magpie proves the same
+ * mechanic with its own `plugin move` (the built-in `zcode` and `workbuddy`
+ * subscriptions became community plugins with their accounts still under
+ * those ids). See `docs/vendors.md` §4.
+ */
+export const TRAE_ID = "trae-cn"
 export const TRAE_NAME = "TRAE (字节)"
 
 /**

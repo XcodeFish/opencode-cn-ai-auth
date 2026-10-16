@@ -41,8 +41,8 @@ describe("插件入口", () => {
     expect(typeof raccoon.auth.refresh).toBe("function")
     expect(loomy.auth.refresh).toBeUndefined()
     // Trae 两项写钩子都有：签到是这次接入的目的，续期是轮转型 token 必需的。
-    expect(trae.auth.provider).toBe("trae")
-    expect(providerOf(trae).id).toBe("trae")
+    expect(trae.auth.provider).toBe("trae-cn")
+    expect(providerOf(trae).id).toBe("trae-cn")
     expect(typeof trae.auth.checkin).toBe("function")
     expect(typeof trae.auth.refresh).toBe("function")
     expect(trae.auth.refreshLead).toBe(5 * 60 * 1000)

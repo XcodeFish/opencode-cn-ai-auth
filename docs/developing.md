@@ -59,7 +59,7 @@ sb=$(mktemp -d)
 m() { env HOME="$sb" XDG_CONFIG_HOME="$sb/.config" XDG_CACHE_HOME="$sb/.cache" magpie "$@"; }
 
 m plugin add "$PWD"
-magpie plugin --json       # 应看到 loomy / raccoon / trae 三个 provider，且无加载错误
+magpie plugin --json       # 应看到 loomy / raccoon / trae-cn 三个 provider，且无加载错误
 ```
 
 进一步的交互（**会连真实厂商**，需要真实账号，按需执行）：

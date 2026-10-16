@@ -13,10 +13,10 @@ import { at, cannedFetch, fakeClient, jsonOk, providerOf } from "./helpers.ts"
 describe("装配形状", () => {
   test("provider id / 名称 / 基础地址与两条钩子都在", async () => {
     const hooks = await TraeAuthPlugin({ client: fakeClient() })
-    expect(hooks.auth.provider).toBe("trae")
+    expect(hooks.auth.provider).toBe("trae-cn")
     expect(hooks.auth.methods.length).toBeGreaterThan(0)
     const provider = providerOf(hooks)
-    expect(provider.id).toBe("trae")
+    expect(provider.id).toBe("trae-cn")
     expect(hooks.config).toBeDefined()
   })
 
@@ -24,16 +24,16 @@ describe("装配形状", () => {
     const hooks = await TraeAuthPlugin({ client: fakeClient() })
     const config: { provider?: Record<string, { api?: string; models?: Record<string, unknown> }> } = {}
     hooks.config?.(config)
-    const entry = config.provider?.trae
+    const entry = config.provider?.["trae-cn"]
     expect(entry?.api).toBe("https://trae-api-cn.mchost.guru")
     expect(Object.keys(entry?.models ?? {}).length).toBeGreaterThan(0)
   })
 
   test("没有登录态时 loader 报需要重新登录", async () => {
     const hooks = await TraeAuthPlugin({ client: fakeClient() })
-    await expect(hooks.auth.loader(async () => undefined, { id: "trae", models: {} })).rejects.toBeInstanceOf(
-      SignInExpiredError,
-    )
+    await expect(
+      hooks.auth.loader(async () => undefined, { id: "trae-cn", models: {} }),
+    ).rejects.toBeInstanceOf(SignInExpiredError)
   })
 })
 
