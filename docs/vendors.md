@@ -340,8 +340,20 @@ loader 的 fetch 把 JSON 形态（非 event-stream）的 200+100002 重建为
 - 倍率：`billing_effective_multiplier` → `rate`，`billing_multiplier` 更大时 →
   `rateWas`，`rate === 0` → `free`。
 - 上下文/输出上限取 `params.context_window` / `params.max_tokens`。
-- `tags` 少报图片能力：`sn-glm-5-3-flash`、`sn-deepseek-v4-1-flash` 两个模型
-  由白名单显式标记为支持图片（2026-09-29 实测 `image_tokens = 64`）。
+- **图片能力「默认支持 + 纯文本黑名单」**（2026-10-22 自 JetHub 2227e9b 移植，判据
+  两步演进）：远端 `model_catalog` 从未下发任何模态字段，唯一信号 `tags.vision`
+  是客户端「Raccoon-Auto 选模」的偏好标签、不是能力契约（2026-09-29 实测
+  `image_tokens = 64`，6 个可见模型全部能读图，其中两个 tags 根本不含 vision）
+  ——当时的修法是精确 id 白名单；2026-10-21 远端滚动上架同族版本
+  `sn-deepseek-v4-1-flash-1017`（tags 与无后缀版逐字相同），白名单查不到 ⇒
+  又被打回纯文本 ⇒ 图片根本没发出去（实测该 id 带图 200、四象限纯色全对）⇒
+  白名单式判据必然腐坏，判据翻转为「默认 image」：只把实测确认的纯文本模型登记进
+  `RACCOON_TEXT_ONLY_MODELS` 显式禁掉（**当前为空集**），黑名单按基础 id 命中
+  （剥 `-NNNN` 版本后缀，非 4 位数字不剥，避免误禁 `-next` 变体）。
+  ⚠️ 代价：真正的纯文本模型上线而未登记时，上游可能静默忽略图片（模型凭文字
+  幻觉作答），新增黑名单条目必须先实测「带图被明确拒绝（4xx/明确错误码）」；
+  ⚠️ `sn-glm-5-3` 的 3 次只对 1 次是**网关节点不一致**（错误体暴露 3 个 fallback
+  组、部分节点纯文本），是节点问题不是模型能力，不登记。
 - 回退表 6 个可见模型，读自 2026-09-26，顺序与服务一致。
 
 ### 思考开关

@@ -13,25 +13,20 @@
  * - `visible: false` is the service hiding a model from its own picker
  *   (three `raccoon-*` internals). A model the vendor hides is not one this
  *   package offers.
- * - `tags` under-report image support: GLM-5-3-Flash and
- *   DeepSeek-V4.1-Flash both read images and neither says so (measured), so
- *   the two are added by `RACCOON_IMAGE_MODELS` rather than by guessing from
- *   names.
+ * - **图片能力不看 `tags`**：远端从未下发模态字段，`tags.vision` 是客户端
+ *   「Raccoon-Auto 选模」的偏好标签、不是能力契约（2026-10-03/10-21 两次实测
+ *   证伪，见 `product.ts` 的判据演进）。判据是「默认支持 + 纯文本黑名单」：
+ *   `supportsImageOf(id)` 对不在黑名单的模型一律 true——白名单式判据会随
+ *   同族滚版本（`-1017` 后缀）腐坏。
  */
 
-import { asArray, asObject, num, str, stringList } from "../../core/json.ts"
+import { asArray, asObject, num, str } from "../../core/json.ts"
 import type { ModelSpec } from "../../core/models.ts"
-import { RACCOON_EFFORTS, RACCOON_FALLBACK_MODELS, RACCOON_IMAGE_MODELS } from "./product.ts"
+import { RACCOON_EFFORTS, RACCOON_FALLBACK_MODELS, supportsImageOf } from "./product.ts"
 
 function positiveInt(value: unknown): number | undefined {
   const parsed = num(value)
   return parsed !== undefined && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
-}
-
-function readsImages(entry: Record<string, unknown>, id: string): boolean {
-  const tags = stringList(entry.tags).map((tag) => tag.toLowerCase())
-  const said = tags.some((tag) => tag === "vision" || tag === "image" || tag === "image-understanding")
-  return said || RACCOON_IMAGE_MODELS.includes(id)
 }
 
 /** One catalog entry as a `ModelSpec`; undefined for anything else. */
@@ -59,7 +54,8 @@ export function parseModel(entry: unknown): ModelSpec | undefined {
     ...(rate === undefined ? {} : { rate }),
     ...(rateWas === undefined ? {} : { rateWas }),
     ...(rate === 0 ? { free: true } : {}),
-    images: readsImages(record, id),
+    // 不看 tags（不是能力契约）；默认支持，纯文本黑名单显式禁（见 product.ts）。
+    images: supportsImageOf(id),
     reasoning: true,
     efforts: [...RACCOON_EFFORTS],
   }

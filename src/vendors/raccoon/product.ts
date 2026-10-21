@@ -147,13 +147,70 @@ export const RACCOON_OFFICE_IDENTITY_OPTION = "officeIdentity"
 export const RACCOON_EFFORTS: readonly string[] = ["none", "high"]
 
 /**
- * The models the catalog does not mark as taking images but that do.
+ * **实测确认不能读图**的模型（**基础 id**）—— 图片能力「默认支持」策略的唯一刹车。
  *
- * Measured on 2026-09-29 (`usage.prompt_tokens_details.image_tokens = 64`
- * for a probe image on both): the catalog's `tags` are incomplete, and a
- * model told it cannot read an image is a model nothing will attach one to.
+ * ## 为什么判据是「默认支持 + 黑名单」而不是白名单（2026-10-22 自 JetHub 2227e9b 移植）
+ *
+ * 判据演进有三步，每步都是真机报障逼出来的：
+ *
+ * 1. **`tags.vision` 不是能力契约**（2026-10-03 报障）：远端 `model_catalog`
+ *    **从未下发**任何模态字段（穷举键并集、按模态词扫描命中 0 个）；唯一的信号
+ *    `tags.vision` 是客户端「Raccoon-Auto 选模」的**偏好标签**——2026-10-03 实测
+ *    6 个可见模型全部能读图（`usage.prompt_tokens_details.image_tokens = 64`），
+ *    其中 `sn-deepseek-v4-1-flash` / `sn-glm-5-3-flash` 的 tags 根本不含 vision。
+ *    当时的修法是精确 id 白名单（旧 `RACCOON_IMAGE_MODELS`）。
+ * 2. **白名单必然腐坏**（2026-10-21 报障）：远端滚动上架同族版本
+ *    `sn-deepseek-v4-1-flash-1017`，tags 与无后缀版逐字相同（仍无 vision）⇒
+ *    精确 id 查不到 ⇒ 又被打回纯文本 ⇒ 宿主把图片替换成文本占位符，图片根本
+ *    没发出去。实测该 id 带图 200、四象限纯色全对。
+ * 3. ⇒ 判据翻转为「**默认 image**」：不在本集合里的模型一律返回 true；真正的
+ *    纯文本模型登记进集合**显式禁掉**。
+ *
+ * ## ⚠️ 代价（必须知道）
+ *
+ * 若远端上线一个真正的纯文本模型而没及时登记，宿主会放行图片，上游可能
+ * **静默忽略**（不是报错）⇒ 模型凭文字幻觉作答。本集合是唯一刹车：**新增条目
+ * 必须先实测**，判据是「带图请求被明确拒绝（4xx / 明确错误码）」，而不是
+ * 「200 但答非所问」。
+ *
+ * ⚠️ **不要**把网关节点不一致登记进来：`sn-glm-5-3` 实测 3 次只对 1 次、错误体
+ * 暴露 3 个 fallback 组、部分节点纯文本——那是节点问题不是模型能力，登记会把
+ * 正常节点一起禁掉。当前目录没有实测确认的纯文本模型 ⇒ 空集。
  */
-export const RACCOON_IMAGE_MODELS: readonly string[] = ["sn-glm-5-3-flash", "sn-deepseek-v4-1-flash"]
+export const RACCOON_TEXT_ONLY_MODELS: ReadonlySet<string> = Object.freeze(new Set<string>([]))
+
+/**
+ * 远端同族模型的**版本后缀**（如 `sn-deepseek-v4-1-flash-1017` 的 `-1017`）。
+ *
+ * ⚠️ 只在「查纯文本集合」时剥离，**不用于展示名 / 请求 id**：请求必须用远端
+ * 下发的完整 id（剥了会 404）。后缀限定 4 位纯数字，避免误禁 `-next` / `-text`
+ * 一类变体。这是一条**局部归一化**，不是全局 id 改写。
+ */
+const RACCOON_MODEL_VERSION_SUFFIX = /-\d{4}$/
+
+/**
+ * 图片能力判定的**纯函数内核**（集合入参化）。
+ *
+ * ⚠️ 为什么要入参化：生产集合是**空集**（当前目录没有实测确认的纯文本模型），
+ * 判据若直接闭包读常量，「纯文本模型被禁」这条分支永远测不到——只能测到恒 true。
+ * 集合入参让测试可以注入非空集合，把两格分支都锁住。
+ */
+export function supportsImageWith(textOnly: ReadonlySet<string>, modelId: string): boolean {
+  if (textOnly.has(modelId)) return false
+  // 同族滚版本：`sn-deepseek-v4-1-flash-1017` → `sn-deepseek-v4-1-flash`。
+  // 纯文本模型同样会滚版本，必须按基础 id 命中，否则新版会漏禁。
+  const baseId = modelId.replace(RACCOON_MODEL_VERSION_SUFFIX, "")
+  if (baseId !== modelId && textOnly.has(baseId)) return false
+  return true
+}
+
+/**
+ * 远端目录条目的图片能力判定 —— **默认支持**，只有 {@link RACCOON_TEXT_ONLY_MODELS}
+ * 里的模型才返回 false。兜底表与远端解析**共用这一个判据**（单测锁死不分叉）。
+ */
+export function supportsImageOf(modelId: string): boolean {
+  return supportsImageWith(RACCOON_TEXT_ONLY_MODELS, modelId)
+}
 
 /**
  * The catalog for a moment when `/model_catalog` cannot be read.
