@@ -15,7 +15,14 @@ import { vendorLogger } from "../../core/log.ts"
 import { markFallback, toConfigModels, toModelRecord } from "../../core/models.ts"
 import { defineVendor, modelContextOf, type VendorContext } from "../../core/plugin.ts"
 import type { ModelRecord, UsageReport } from "../../core/types.ts"
-import { chatHeaders, claimDailyQuota, claimOnboardingTasks, fetchCatalog, fetchPoints } from "./api.ts"
+import {
+  chatHeaders,
+  claimDailyQuota,
+  claimOnboardingTasks,
+  fetchCatalog,
+  fetchPoints,
+  rewriteAuthFailure,
+} from "./api.ts"
 import { lockedRefusal, rememberDailyBalance } from "./balance.ts"
 import { loginMethods } from "./login.ts"
 import { fallbackModels, modelsFrom } from "./models.ts"
@@ -56,7 +63,10 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
         baseURL: LOOMY_API_BASE,
         apiKey: access,
         headers: chatHeaders(access),
-        fetch: gatedFetch(fetch, () => lockedRefusal(auth, options)),
+        // 两层各司其职：门禁（锁定永久积分）先拦；200+100002 的认证失败重建为
+        // 401 交给宿主标记账号（`rewriteAuthFailure`）——否则聊天链路的登录态
+        // 失效只会表现为一条「响应不是 OpenAI 应答」的形状错误。
+        fetch: gatedFetch(rewriteAuthFailure(fetch), () => lockedRefusal(auth, options)),
       }
     },
 

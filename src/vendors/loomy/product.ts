@@ -163,6 +163,72 @@ export const LOOMY_ACCESS_KEY_SECRET: CredentialSpec = {
 export const LOOMY_EFFORTS: readonly string[] = ["none", "low", "medium", "high", "xhigh"]
 
 /**
+ * 上下文窗口的**逐模型硬覆盖**（`模型 id → 真实窗口`）。
+ *
+ * ## 为什么需要（真实缺陷，JetHub Gitee issue IKJW31，2026-10-08 落地）
+ *
+ * 远端 `GET /models` 对 **`spark-x` 声明 `context_length: 1048576`，而真实墙在
+ * 262144**：宿主按 1M 放心打包，输入一旦越过 256K，上游**收下请求但 0 输出**
+ * 并回 `finish_reason=length`，整轮静默失败。硬证据：
+ *
+ * 1. 报障会话 4 次失败的 prompt 总量逐 token 相同，全部 = **262,138 = 262,144−6**；
+ *    同晚直连其它模型 473K/518K/644K 全部正常 ⇒ 墙只属于这一个模型。
+ * 2. 官方客户端本地表对 `spark-x` 写 `limit.context = 262144`，同一文件其余 7 条
+ *    与远端逐条一致 ⇒ 官方只对这一个刻意降档。
+ *
+ * ⚠️ **只改兜底表是无效的**：远端可用时走的是远端值（远端自己就声明 1M），
+ * 所以远端解析与兜底表**两条路径都必须过** `contextWindowOf`。
+ * ⚠️ 键必须**小写**：查表经 `catalogKey` 归一，混入大写键会恒不命中
+ * （上游改大小写即静默失效 —— JetHub 2026-10-14 审计教训）。
+ */
+export const LOOMY_CONTEXT_WINDOW_OVERRIDES: Readonly<Record<string, number>> = Object.freeze({
+  "spark-x": 262_144,
+})
+
+/**
+ * 远端声明为**纯文本**、但实测**能读图**的模型（`input_modalities` 漏报）。
+ *
+ * ## 为什么需要（真实缺陷，JetHub 2026-10-14 用户报障）
+ *
+ * 远端对 `qwen-3.8-max` 下发 `capabilities.input_modalities = ['text']`，
+ * 原样直译 ⇒ 图片根本发不出去（宿主按声明做附件准入）。实测判据是随机纯色
+ * PNG 的颜色问答（纯文本模型答不出颜色）：`qwen-3.8-max` 4/5 次答对，同批
+ * `DeepSeek-V4.1-Flash` / `Kimi-k2.6` / `qwen3.8-flash` / `mimo-v2.5` 均读得
+ * 到（远端本来就声明了 image，不需要覆盖）。
+ *
+ * ⚠️ `MiniMax-M3` 远端声明 image 但实测 4/4 未命中（疑似编造答案）——
+ * **刻意不降级**：单账号证据不足以判死一个已声明的能力，降级会改变既有可用路径。
+ * ⚠️ **不要改成「该家恒支持图片」**：白名单只覆盖实测确认的个案，否则将来上架
+ * 真正的纯文本模型时会把图放行，让上游回一个更难懂的 400。
+ * ⚠️ 表内条目必须**小写**（查表经 `catalogKey` 归一）。
+ */
+export const LOOMY_IMAGE_CAPABILITY_OVERRIDES: ReadonlySet<string> = Object.freeze(new Set(["qwen-3.8-max"]))
+
+/**
+ * 模型 id 的**归一化查表键**：上面两张覆盖表唯一的查表口径
+ * （小写、去首尾空白）。⚠️ 只用于查表，绝不改对外 id。
+ */
+export function catalogKey(modelId: string): string {
+  return modelId.trim().toLowerCase()
+}
+
+/**
+ * 取一个模型的**真实**上下文窗口：覆盖表优先于声明值。
+ * ⚠️ 远端与兜底表**两条路径都必须过这里** —— 只改兜底表无效。
+ */
+export function contextWindowOf(modelId: string, declared: number): number {
+  return LOOMY_CONTEXT_WINDOW_OVERRIDES[catalogKey(modelId)] ?? declared
+}
+
+/**
+ * 取一个模型的**真实**图片能力：覆盖表命中即为 true，否则原样返回声明值。
+ * ⚠️ 远端与兜底表**两条路径都必须过这里**。
+ */
+export function supportsImageOf(modelId: string, declared: boolean): boolean {
+  return LOOMY_IMAGE_CAPABILITY_OVERRIDES.has(catalogKey(modelId)) || declared
+}
+
+/**
  * The catalog for a moment when `/models` cannot be read.
  *
  * Read from the live service on 2026-09-26 by JetHub (`loomy-product.ts`),
@@ -172,6 +238,7 @@ export const LOOMY_EFFORTS: readonly string[] = ["none", "low", "medium", "high"
  * The rates in the names come from the same reading: the service states a
  * model's credit rate only inside its display name, in three different
  * bracket styles, and `models.ts` parses it back into `rate`.
+ * ⚠️ `spark-x` 的 context 是覆盖后的真实值（远端虚报 1M，见覆盖表说明）。
  */
 export const LOOMY_FALLBACK_MODELS: readonly ModelSpec[] = [
   {
@@ -226,7 +293,7 @@ export const LOOMY_FALLBACK_MODELS: readonly ModelSpec[] = [
     id: "spark-x",
     name: "Spark X2.5",
     rate: 0.1,
-    context: 1_048_576,
+    context: 262_144,
     reasoning: true,
     efforts: [...LOOMY_EFFORTS],
   },

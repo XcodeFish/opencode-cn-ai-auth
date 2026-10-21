@@ -264,6 +264,57 @@ export function businessHeaders(access: string): Record<string, string> {
   return { Accept: "application/json", token: access }
 }
 
+/**
+ * 把「HTTP 200 + 业务码 100002」重建为 401，让宿主把账号标记为需重新登录。
+ *
+ * ## 为什么需要（JetHub E-1，2026-10-20）
+ *
+ * Loomy 的业务失败**恒 HTTP 200**（`code: "000000"` 才是成功），登录态失效的
+ * 真实形态是 **200 + `{code:"100002"}`**。宿主对聊天链路只认 HTTP 状态码：
+ * 这个失败以 200 交回后，AI SDK 只会报「响应不是合法 OpenAI 应答」之类的形状
+ * 错误，**账号永远不会被标记过期**，用户看到的是一条无关报错而不是「请重新登录」。
+ * `usage` / `provider.models` 走的是本文件的信封解析（100002 → SignInExpired），
+ * 唯独聊天这条路不经解析 —— 所以在 loader 的 fetch 上补这一层。
+ *
+ * ## 形状与边界
+ *
+ * - 只看 **`content-type` 为 JSON（非 event-stream）** 的 200 响应：流式聊天的
+ *   正常应答是 `text/event-stream`，原样透传零开销；SSE 内嵌 100002 属另一形状，
+ *   本包与 JetHub 同样**不做**（那要改流解析器，收益极低）。
+ * - 命中 100002 时重建为 **401 + 原响应体**：宿主按状态码标记账号，且错误文案
+ *   保留厂商原话（`desc`「缺少 token」）。
+ * - ⚠️ 用 `clone()` 探测：原始响应体**绝不**被读取或锁死（JetHub 同一提交里
+ *   「读完 body 必须返回可用 Response」的教训 —— 锁死的流会把上游原话丢掉）。
+ * - 其它业务码（100001 等）不是认证失败：原样交回，不按状态码一刀切。
+ */
+export function rewriteAuthFailure(fetcher: Fetcher): Fetcher {
+  const wrapped = async (input: Parameters<Fetcher>[0], init?: Parameters<Fetcher>[1]): Promise<Response> => {
+    const response = await fetcher(input, init)
+    if (!response.ok) return response
+    const contentType = response.headers.get("content-type") ?? ""
+    if (!contentType.includes("application/json") || contentType.includes("text/event-stream")) {
+      return response
+    }
+    const probe = await response.clone().text()
+    let body: unknown
+    try {
+      body = JSON.parse(probe)
+    } catch {
+      return response
+    }
+    const envelope = parseEnvelope(body)
+    if (!envelope.ok && envelope.code === LOOMY_SIGNED_OUT_CODE) {
+      return new Response(probe, {
+        status: 401,
+        statusText: "Unauthorized",
+        headers: { "content-type": contentType },
+      })
+    }
+    return response
+  }
+  return wrapped as Fetcher
+}
+
 /** What `/chat/completions` wants. Both headers: the client sends both. */
 export function chatHeaders(access: string): Record<string, string> {
   return {

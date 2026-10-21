@@ -16,7 +16,7 @@
 
 import { asArray, asObject, num, str, stringList } from "../../core/json.ts"
 import type { ModelSpec } from "../../core/models.ts"
-import { LOOMY_FALLBACK_MODELS } from "./product.ts"
+import { contextWindowOf, LOOMY_FALLBACK_MODELS, supportsImageOf } from "./product.ts"
 
 /** The tiers the host knows how to send; anything else it drops silently. */
 const KNOWN_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max", "minimal"])
@@ -70,15 +70,20 @@ export function parseModel(entry: unknown): ModelSpec | undefined {
   if (id === undefined || id.length === 0 || record.type !== "chat") return undefined
   const { name, rate } = splitRate(str(record.name) ?? id)
   const efforts = effortsOf(record)
-  const context = num(record.context_length)
+  const declaredContext = num(record.context_length)
   const output = num(record.max_tokens) ?? num(record.max_output_tokens)
   return {
     id,
     name: name.length > 0 ? name : id,
-    ...(context === undefined || context <= 0 ? {} : { context }),
+    // ⚠️ 远端路径也必须过覆盖表：spark-x 的远端声明虚报 1M，只改兜底表无效
+    //（JetHub IKJW31 的「最容易踩空的点」）。
+    ...(declaredContext === undefined || declaredContext <= 0
+      ? {}
+      : { context: contextWindowOf(id, declaredContext) }),
     ...(output === undefined || output <= 0 ? {} : { output }),
     ...(rate === undefined ? {} : { rate }),
-    images: imagesOf(record),
+    // ⚠️ 远端路径也必须过图片覆盖表：qwen-3.8-max 远端漏报 input_modalities。
+    images: supportsImageOf(id, imagesOf(record)),
     reasoning: efforts.length > 0,
     efforts,
   }
