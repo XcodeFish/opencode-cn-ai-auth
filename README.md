@@ -116,6 +116,14 @@ Magpie 仍然从包根入口 `index.ts` 加载各厂商的插件工厂；根入�
 
 ## 登录
 
+### AStudio（讯飞）
+
+- 微信扫码（讯飞公共 SSO）：插件在 `127.0.0.1` 起一个一次性本地页，展示从 SSO 拿到的
+  微信二维码，每 2 秒轮询扫码状态；确认后自动完成会话绑定与凭据交换。
+  **零配置**：不需要 AStudio 客户端，也不需要任何厂商常量。
+- 该微信号还没开通 AStudio 时（第一次使用），请先在 AStudio 客户端里用微信登录并绑定
+  手机号完成开通，再回来扫码 —— 插件会如实提示这一步，反复重扫不会有用。
+
 ### Loomy
 
 - 微信扫码：插件在 `127.0.0.1` 起一个一次性本地页，展示二维码与状态，扫码后长轮询微信。
@@ -161,13 +169,13 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
 
 ## 能力对照
 
-| 能力 | Loomy | Raccoon | TRAE（字节） |
+| 能力 | AStudio（讯飞） | Loomy | Raccoon | TRAE（字节） |
 | --- | --- | --- | --- |
-| 模型目录 | 账号级 `GET /models`，倍率写在展示名里，插件把它解析成 `rate` 徽标；读不到时回退内置 8 个模型并标记为回退 | 账号级 `GET /model_catalog`，取 `type === "chat"` 且非 `visible: false`；倍率来自 `billing_multiplier` / `billing_effective_multiplier`，回退内置 6 个模型 | 账号级 `POST /api/ide/v1/batch_get_detail_param`，一次查多个**通道**并合并成一份目录；每条模型记住来自哪个通道（发错通道会流内回 `4001`）；读不到时回退内置 17 个模型 |
-| 思考档位 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） | 远端 `reasoning_effort_config.options` 的字符串原样作为档位（`light` / `high` / `extra_high` …）；它们是上游 wire 值，不做白名单转换 |
-| 用量卡片 | 三行：今日积分（参与选号）+ 永久积分（`aside`）+ 新手任务进度（`aside`，8/8 领完时不显示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） | `POST /pay/ide_user_ent_usage` 的**积分包**列表，剩余 = Σ(授予 − 已用)，另加一行签到状态；服务从不公布账号级上限，全部 `aside` |
+| 模型目录 | 账号级 `GET /api/v1/model-manager/models`（推理域 Bearer），按裸 slug 去重、内部别名不暴露；读不到时回退内置 6 个模型并标记为回退 | 账号级 `GET /models`，倍率写在展示名里，插件把它解析成 `rate` 徽标；读不到时回退内置 8 个模型并标记为回退 | 账号级 `GET /model_catalog`，取 `type === "chat"` 且非 `visible: false`；倍率来自 `billing_multiplier` / `billing_effective_multiplier`，回退内置 6 个模型 | 账号级 `POST /api/ide/v1/batch_get_detail_param`，一次查多个**通道**并合并成一份目录；每条模型记住来自哪个通道（发错通道会流内回 `4001`）；读不到时回退内置 17 个模型 |
+| 思考档位 | 远端 `supported_reasoning_levels` 原样（`none` / `high` / `max`）；只声明远端下发过的档位 —— 上游对非法档位不报错、按最大档计费执行 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） | 远端 `reasoning_effort_config.options` 的字符串原样作为档位（`light` / `high` / `extra_high` …）；它们是上游 wire 值，不做白名单转换 |
+| 用量卡片 | `points/balance` 的权威合计 + 会员/购买/赠送/星火分池（各自带到期展示）；无重置周期，全部 `aside`（只展示，不参与选号） | 三行：今日积分（参与选号）+ 永久积分（`aside`）+ 新手任务进度（`aside`，8/8 领完时不显示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） | `POST /pay/ide_user_ent_usage` 的**积分包**列表，剩余 = Σ(授予 − 已用)，另加一行签到状态；服务从不公布账号级上限，全部 `aside` |
 | 锁定永久积分 | `options.lockPermanent: true` 时，今日额度用完即拒绝请求（429，宿主把账号 bench 到窗口重置），不再悄悄花永久积分 | — | — |
-| 每日签到 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 | 有：先查 `checkin_credits/status`（已领就不发写请求），再 `checkin_credits/claim`；claim 响应不含积分数，成功后再查一次 status 取实际所得。签到按**设备**每日一次，`9074` 如实报失败、不换设备重试 |
+| 每日签到 | 有：`client-popups/pending` 空表即已领（零写请求），否则对每个可领弹窗 `complete`（每日签到 + 新手礼包一起领）；登录成功后顺手领一次 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 | 有：先查 `checkin_credits/status`（已领就不发写请求），再 `checkin_credits/claim`；claim 响应不含积分数，成功后再查一次 status 取实际所得。签到按**设备**每日一次，`9074` 如实报失败、不换设备重试 |
 - **新手任务（Loomy）**：宿主没有一次性奖励钩子，也不给插件任何按钮，所以本包把领取
   挂在两处：`auth.checkin`（`Check in now` / `magpie accounts checkin` / 每日自动签到
   都会顺手领），以及 `auth.usage`——**卡片读到还有未完成就自动领掉**，用户不用点任何
@@ -175,8 +183,8 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
   `credit`（那是「今日额度」）。进度在用量卡片上另占一行
   （`新手任务 2/8 · 已领 1500 / 还有 8500 分可领`，`aside`、8/8 领完不显示）。
   详见 [`docs/vendors.md`](docs/vendors.md) §2。
-| 续期 | 没有 refresh 端点：会话 14 天，按本地时间记 `expires`，到期需重新登录 | 有：`POST /refresh` 轮换 `access_token`（`refresh_token` 缺省时保留旧值），提前 5 分钟刷新 | 有：`ExchangeToken` **同时轮换两个 token**，续期时把新值写回、并保留设备指纹；提前 5 分钟刷新 |
-| 图片输入 | 按 `/models` 的输入模态 | 按目录 `tags` + 两个实测能读图但未标 vision 的模型白名单 | 按远端 `display_config.multimodal`；缺失一律当不支持（宁可不发） |
+| 续期 | 没有 refresh token 也没有 TTL：401 时拿存活的 Cookie 重问 `bot/models/configs` 换新凭据、写回并重试一次；自愈失败需重新登录 | 没有 refresh 端点：会话 14 天，按本地时间记 `expires`，到期需重新登录 | 有：`POST /refresh` 轮换 `access_token`（`refresh_token` 缺省时保留旧值），提前 5 分钟刷新 | 有：`ExchangeToken` **同时轮换两个 token**，续期时把新值写回、并保留设备指纹；提前 5 分钟刷新 |
+| 图片输入 | 以远端 `input_modalities` 为判据（当前六模型全为 `text`，即不支持） | 按 `/models` 的输入模态 | 按目录 `tags` + 两个实测能读图但未标 vision 的模型白名单 | 按远端 `display_config.multimodal`；缺失一律当不支持（宁可不发） |
 
 ## 架构设计
 

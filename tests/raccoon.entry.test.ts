@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test"
 import * as entry from "../index.ts"
+import astudioOpenCode from "../opencode/astudio.ts"
 import loomyOpenCode from "../opencode/loomy.ts"
 import raccoonOpenCode from "../opencode/raccoon.ts"
 import { fakeClient, providerOf } from "./helpers.ts"
@@ -16,22 +17,30 @@ import { fakeClient, providerOf } from "./helpers.ts"
 describe("插件入口", () => {
   test("只导出插件工厂，不导出工具函数或常量", () => {
     expect(Object.keys(entry).sort()).toStrictEqual([
+      "AstudioAuthPlugin",
       "LoomyAuthPlugin",
       "RaccoonAuthPlugin",
       "TraeAuthPlugin",
     ])
+    expect(typeof entry.AstudioAuthPlugin).toBe("function")
     expect(typeof entry.LoomyAuthPlugin).toBe("function")
     expect(typeof entry.RaccoonAuthPlugin).toBe("function")
     expect(typeof entry.TraeAuthPlugin).toBe("function")
   })
 
-  test("三个工厂都能装配出各自 provider 的钩子", async () => {
+  test("四个工厂都能装配出各自 provider 的钩子", async () => {
     const input = { client: fakeClient() }
-    const [loomy, raccoon, trae] = await Promise.all([
+    const [astudio, loomy, raccoon, trae] = await Promise.all([
+      entry.AstudioAuthPlugin(input),
       entry.LoomyAuthPlugin(input),
       entry.RaccoonAuthPlugin(input),
       entry.TraeAuthPlugin(input),
     ])
+    expect(astudio.auth.provider).toBe("astudio")
+    expect(providerOf(astudio).id).toBe("astudio")
+    expect(typeof astudio.auth.checkin).toBe("function")
+    // AStudio 没有 refresh token 也没有 TTL：不实现假的续期，401 自愈在 loader.fetch 里。
+    expect(astudio.auth.refresh).toBeUndefined()
     expect(loomy.auth.provider).toBe("loomy")
     expect(providerOf(loomy).id).toBe("loomy")
     expect(typeof loomy.auth.checkin).toBe("function")
@@ -52,10 +61,14 @@ describe("插件入口", () => {
     expect(loomyOpenCode.id).toBe("loomy")
     expect(typeof loomyOpenCode.setup).toBe("function")
     expect("server" in loomyOpenCode).toBe(false)
+    expect(astudioOpenCode.id).toBe("astudio")
+    expect(typeof astudioOpenCode.setup).toBe("function")
+    expect("server" in astudioOpenCode).toBe(false)
     expect(raccoonOpenCode.id).toBe("raccoon")
     expect(typeof raccoonOpenCode.setup).toBe("function")
     expect("server" in raccoonOpenCode).toBe(false)
 
+    const astudioAdded: { info: Record<string, unknown>; models: readonly Record<string, unknown>[] }[] = []
     const loomyAdded: { info: Record<string, unknown>; models: readonly Record<string, unknown>[] }[] = []
     const raccoonAdded: { info: Record<string, unknown>; models: readonly Record<string, unknown>[] }[] = []
     const hooks: ((event: unknown) => void | Promise<void>)[] = []
@@ -64,6 +77,15 @@ describe("插件入口", () => {
       method: Record<string, unknown>
       authorize?: unknown
     }[] = []
+    await astudioOpenCode.setup({
+      options: { accessToken: "astudio-bearer" },
+      provider: { transform: async (callback) => callback({ add: (input) => astudioAdded.push(input) }) },
+      session: { hook: async (_name, callback) => void hooks.push(callback) },
+      integration: {
+        transform: async (callback) =>
+          callback({ method: { update: (input) => integrationUpdates.push(input) } }),
+      },
+    })
     await loomyOpenCode.setup({
       options: { accessToken: "loomy-session" },
       provider: { transform: async (callback) => callback({ add: (input) => loomyAdded.push(input) }) },
@@ -83,6 +105,12 @@ describe("插件入口", () => {
       },
     })
 
+    expect(astudioAdded[0]?.info).toMatchObject({
+      id: "astudio",
+      settings: { baseURL: "https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1" },
+      headers: { Authorization: "Bearer astudio-bearer", token: "astudio-bearer" },
+    })
+    expect(astudioAdded[0]?.models.length).toBeGreaterThan(0)
     expect(loomyAdded[0]?.info).toMatchObject({
       id: "loomy",
       settings: { baseURL: "https://loomyad.xunfei.cn/api/v1" },
@@ -103,7 +131,13 @@ describe("插件入口", () => {
       id: "none",
       body: { extra_body: { thinking: { type: "disabled" } } },
     })
-    expect(hooks).toHaveLength(2)
+    const astudioOAuth = integrationUpdates.find(
+      (update) => update.integrationID === "astudio" && update.method.type === "oauth",
+    )
+    expect(typeof astudioOAuth?.authorize).toBe("function")
+    // astudio: 一个 oauth 方式（微信 SSO 扫码）+ env + key。
+    expect(integrationUpdates.filter((update) => update.integrationID === "astudio")).toHaveLength(3)
+    expect(hooks).toHaveLength(3)
     // loomy: 两个 oauth 方式（微信 + 短信）+ env + key。
     expect(integrationUpdates.filter((update) => update.integrationID === "loomy")).toHaveLength(4)
     expect(integrationUpdates.filter((update) => update.integrationID === "raccoon")).toHaveLength(3)
@@ -117,7 +151,8 @@ describe("插件入口", () => {
     const request = {
       request: { url: "https://loomyad.xunfei.cn/api/v1/chat/completions", headers: new Headers() },
     }
-    await hooks[0]?.(request)
+    // hooks 按注册顺序是 astudio → loomy → raccoon；lucky 的 bearer 注入属于 loomy。
+    await hooks[1]?.(request)
     expect(request.request.headers.get("authorization")).toBe("Bearer loomy-session")
     expect(request.request.headers.get("token")).toBe("loomy-session")
   })

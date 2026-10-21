@@ -2,6 +2,35 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.0] - 2026-10-21
+
+### Added
+
+- **新厂商 AStudio（讯飞 AstronStudio 桌面端）**：第四个 provider（`astudio`）。
+  协议移植自 JetHub 的 astudio provider（MIT；其事实由 2026-10-15 ~ 2026-10-20
+  真机实测钉住），双域架构 —— 推理网关（OpenAI 兼容，`Bearer`）与账号控制面
+  （`Cookie: ssoSessionId=…`）分离，对话、模型目录、积分余额、每日签到（弹窗奖励
+  `client-popups`，含新手礼包）全部接入。事实与未验证边界见 `docs/vendors.md` §5。
+- **微信扫码登录零配置**：走讯飞公共 SSO（`scanlogin/qrcode|uids|bind`），本包自备
+  8 位 `fd`，不需要 AStudio 客户端、不需要任何厂商自有常量 —— 四家厂商里唯一
+  「装上就能登」的登录方式。该微信号未开通 AStudio 时如实提示先去客户端绑定
+  手机号（信封的「成功」只是请求状态，反复重扫没有用）。
+- **401 自愈链**：磁盘会话无 TTL、无 refresh token，唯一失效信号是推理端点 401；
+  `loader.fetch` 在 401 时拿存活的 Cookie 重问 `bot/models/configs`（幂等纯读）换新
+  凭据、写回账号并重试一次。同值不重试（同 token 同 401 是确定性失败），重取失败
+  原样交还 401 让宿主标记账号，绝不吞失效信号。没有 `auth.refresh` 钩子 ——
+  不实现假的续期。
+- 思考档位只声明远端 `supported_reasoning_levels` 下发过的集合（上游对非法档位
+  不报错、按最大档计费执行）；图片能力以远端 `input_modalities` 为判据。
+- `magpie plugin --json` 的 `astudio` 图标为自绘最小 SVG data URI（无官方矢量 mark
+  可取，与 JetHub 同款取舍）。
+- OpenCode V2 子入口 `opencode/astudio`（`ASTUDIO_ACCESS_TOKEN` 环境变量 / 手填
+  token / 扫码三种接入）。
+- 测试 +59：信封两形态、`api_key` 优先级（`is_current` → `is_default` → 首条非空，
+  空值跳过）、裸 slug 解码（含 `-`/`_` 的 base64url）、分池与 `componentType`
+  取证字段、扫码状态机（pending/scanned/unbound/超时）、401 自愈三格判据、
+  额度窗口全部 `aside` 的口径。
+
 ## [0.8.1] - 2026-10-16
 
 ### Fixed

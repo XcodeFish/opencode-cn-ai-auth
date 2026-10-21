@@ -636,11 +636,119 @@ Trae 也提供 OpenCode V2 子入口（`opencode/trae.ts`）。它与另两家�
 尺寸说明：48x48 在高分屏上会偏软，但它就是厂商自己声明的那一张。本包不复制品牌资源，
 也不自行放大或重绘；若日后厂商发布更大的 mark，换掉这一个常量即可。
 
-## 5. 未验证边界（发布前需知）
+## 5. AStudio（讯飞 AstronStudio）
+
+`provider id = astudio`，显示名 `AStudio (讯飞)`。协议移植自 JetHub 的 astudio provider
+（`src/astudio*.ts`，MIT），其事实由 2026-10-15 ~ 2026-10-20 真机实测钉住（JetHub 仓库
+`docs/agent-notes/providers-astudio.md`）。
+
+### 端点与协议（双域分离）
+
+| 域 | 基址 | 鉴权 |
+|---|---|---|
+| 推理网关 | `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1` | `Authorization: Bearer <modelBearerToken>`（`X-Account-Id`/`clientType:21`/`studioVersion:3.5.2` 可选，实测都不带也能 200） |
+| 账号控制面 | `https://agent.xfyun.cn/xingchen-studio` | `Cookie: ssoSessionId=…; sso_sessionid=…; account_id=…; token=…`（四键同发，`token` 缺失回落 `ssoSessionId`） |
+| SSO | `https://sso.xfyun.cn/SSOService/wx/scanlogin` | 随机 8 位 `fd`（本包自备，无需厂商常量） |
+
+| 用途 | 方法 | 路径 |
+|---|---|---|
+| 对话（OpenAI 兼容） | POST | `/chat/completions`（推理域） |
+| 模型目录 | GET | `/api/v1/model-manager/models`（推理域；⚠️ `/model-gateway/v1/models` 实测恒 404） |
+| 活体凭据权威源 | GET | `/bot/models/configs`（控制面；`data` 是**数组**，行内取 `api_key`） |
+| 登录收尾 | POST/GET | `/tenant-app/v2/init-app`（非阻塞）→ `/userInfo`（微信才调）→ `/bot/models/configs` |
+| 积分余额 | GET | `/points/balance` |
+| 每日签到/新手礼包 | GET/POST | `/client-popups/pending` → `/client-popups/complete` |
+| 微信扫码 | GET/POST | `scanlogin/qrcode?fd=` → `scanlogin/uids?fd=`（轮询）→ `scanlogin/bind` |
+
+结构性事实（都不是从代码推出来的）：
+
+1. **两域两套鉴权**：推理端点不消费 Cookie；控制面端点不消费 Bearer。
+2. **`model` 只认裸 slug**：`builtin/<base64url(slug)>` 是 acode 内核的内部别名，
+   发给推理端点回 502 `model_not_found`；本包对外只暴露裸 slug。
+3. **两种失败信封**：控制面 `{code, message|desc, data}`（HTTP 恒 200，`code !== 0`
+   即失败；`code:0` 但 `data` 空/缺 = 会话失效或无凭据）；推理面 OpenAI 裸体，
+   失败 `{"error":{…}}` 配非 2xx。⚠️ 唯一例外：`client-popups/pending` 的
+   `data:[]` 是**合法空结果**（当日已领），不是会话失效。
+4. **凭据双轨自愈**：磁盘会话无 TTL、无 refresh token；唯一失效信号是推理端点
+   HTTP 401，自愈 = 拿存活的 Cookie 重问 `bot/models/configs` 换新 `api_key`
+   （幂等纯读），写回账号并**重试一次**（同值不重试：同 token 同 401 是确定性失败）。
+5. **失效码集合只登记实测过的 `{1002, 1005, 80000}`**：`80000` 是账号后端会话
+   失效的真实形态（HTTP 200 + `{code:80000}`），客户端自己的失效码集合反而不含它。
+
+### 登录方式
+
+| 方式 | 流程 | 依赖 |
+|---|---|---|
+| 微信扫码登录 | 本包生成 8 位 `fd` → SSO `qrcode` 拿微信 ticket URL → 下载图片内联进本地页 → 2s 轮询 `uids`（`-1` 未扫码；`0` + 账号列表 = 已确认，`uid` 与 `ssoSessionId` **互为兜底**）→ `bind` → 收尾三步换凭据 | **无**（零配置；无需 AStudio 客户端、无需厂商常量） |
+
+- `code:0` 但列表为空 = **该微信号尚未开通 AStudio**（信封的 `desc:"成功"` 只是请求
+  状态）：文案指向「先在 AStudio 客户端里登录并绑定手机号完成开通」，不叫用户重扫
+  ——同一个号再扫还是空（JetHub 2026-10-20 报障实录）。
+- `uids` 的账号行在部分路径下只给 `token` 不给 `ssoSessionId`（或反之），三处解析
+  同一套互为兜底口径，不会只有扫码这一条登录失败。
+- 短信/密码登录（客户端的另外两条路）要过极验（GeeTest），本包第一版不接，
+  见未验证边界。
+
+### 会话与续期
+
+- **没有 refresh 端点，也没有 TTL**：账号按 API key 形状存储（`key` = 活体
+  `modelBearerToken`），Cookie 四件套与昵称由宿主放进 `metadata`；`expires` 不设
+  （没有可推断的到期时间，到期交给 401），不实现假的续期。
+- 401 自愈在 `loader.fetch` 里：每次响应看状态码，401 时重取一次 configs、写回新
+  凭据、重试一次。只处理 `(url, init)` 形态（AI SDK 的调用形状）；`Request` 入参的
+  body 已被消费、无法安全重建，直接交还 401 让宿主标记账号。
+- 推理端点的流内 `code` 不参与凭据轮换（与客户端一致）；403 **刻意不翻译**成失效
+  （额度/权限/地域限制都用它，见下方第 8 条对 403 的总体裁决）。
+
+### 模型目录
+
+- 端点按账号返回；解析规则：`visibility: "hide"`（内部别名）不产出；按裸 slug 去重；
+  `efforts` 取 `supported_reasoning_levels[].effort` 原样集合，`default_reasoning_level`
+  只在落在集合内时保留（越界的档位声明会被宿主静默丢弃）。
+- **思考档位只声明远端下发过的**：上游对非法档位不报错、按最大档静默执行
+  （实测 `reasoning_effort:"bogus"` 以最大档计费跑完），编造档位等于让用户按最大档
+  计费却以为选了低档。
+- 图片能力以远端 `input_modalities` 是否含 `image` 为判据（实测六个模型全是
+  `['text']`，因此恒不支持；判据是远端字段，上游加视觉模型即自动生效）。
+- 回退表 6 个模型（`xopglm52` / `astronclaw-auto` / `xopdsv4flash0731in` /
+  `xopdeepseekv4pro0813` / `spark-x2.5` / `spark-x2.6-preview`），读自 2026-10-15，
+  顺序与服务一致。⚠️ 表里没有 `glm5.3flash` —— 它在上游目录中不存在
+  （对全量 JSON 零命中）；编造一个上游不认的 slug，症状是选中后 502。
+
+### 积分（额度窗口）
+
+| 窗口 | 来源 | 宿主语义 |
+|---|---|---|
+| 可用积分 | `points/balance` 的权威字段 `totalBalance`（**不是**逐池求和——星火池与主池互不相通，求和会凭空多出星火那份） | `aside: true` |
+| 会员/购买/赠送/星火积分 | 同一响应的 `*Total` / `*Balance` / `*NextExpireTime`，池缺失就不出那一行 | 全部 `aside: true`，到期时刻如实展示（`MM-DD 到期`） |
+
+- **全部 `aside`**：积分按活动到期、用完即没，没有会自动回填的周期。把已用百分比
+  交给宿主路由会让「积分即将到期」的账号被 bench 到一个不存在的重置点（与 Raccoon
+  同款取舍，理由同 `docs/vendors.md` §3）。
+- `*NextExpireTime` 是**不带时区的本地时间串**，按本机时区解析（服务端时区未验证，
+  见未验证边界）；官方 Schema 不保证下发，缺席不臆造。
+
+### 每日签到与新手礼包
+
+- 挂在 `auth.checkin`（宿主唯一的写钩子：`Check in now` / `magpie accounts checkin` /
+  每日自动签到）。流程：`pending` 空数组 = 今日已领（`done`，零写请求）；否则对每个
+  可领弹窗 `complete {popupId, instanceKey}`（每日签到 + 新手礼包一起领）。
+- ⚠️ 弹窗类型的真实字段是 **`componentType`**，不是 `type`（JetHub 2026-10-20 真机
+  取证：读 `type` 一个可领弹窗都识别不出来 ⇒ 界面显示「今天已领取」而积分一动不动）。
+  本包优先 `componentType`，兼容 `type`。
+- 登录成功后顺手领一次（客户端登录收尾同款，幂等；失败只记日志不阻断登录）。
+
+### 图标
+
+`ASTUDIO_ICON` 是自绘最小 SVG 的 `data:image/svg+xml` URI（蓝底圆角方块 + 白色 A，
+与 JetHub 同款）：AStudio 没有可取回的官方矢量 mark（客户端 asar 资源未公开、站点
+favicon 是通用讯飞标）。内联 URI 避免外链失效，~350 字节，远在宿主 1 MB 上限内。
+
+## 6. 未验证边界（发布前需知）
 
 以下内容在源码/客户端层面有据，但**没有在 magpie 内实测过**，不要当成已验证事实：
 
-1. 三家厂商的插件都未在 magpie 宿主内跑过真实登录与真实聊天；当前证据是
+1. 四家厂商的插件都未在 magpie 宿主内跑过真实登录与真实聊天；当前证据是
    `plugin add` 级别的加载与形状检查（见 `developing.md` §3）。Trae 的额外风险单列在
    下方第 11–15 条。
 2. Raccoon 的思考开关端到端未抓包确认：`variants{none,high}` + `extra_body`
@@ -725,6 +833,28 @@ Trae 也提供 OpenCode V2 子入口（`opencode/trae.ts`）。它与另两家�
    `/trae/api/v3/oauth/ExchangeToken` 的探测（2026-10-16，两个 host 都试过）在没有
    合法 `AuthCode` 时只回 `10101 无效参数`，无法区分「缺 DeviceInfo」与「码是假的」。
    若真机登录报无效参数，第一处要试的就是补上 `DeviceInfo`。
+18. **AStudio 未在 magpie 内跑过真实登录与真实聊天**。当前证据是三件事：(a) 协议
+   事实来自 JetHub 的 astudio 实现，而 JetHub 在真机上验证过这些通道（含 2026-10-15
+   的全量目录实测与 2026-10-20 的弹窗字段取证）；(b) 本包的解析与自愈规则由离线测试
+   逐条锁住（`tests/astudio.*.test.ts`：信封两形态、api_key 优先级、裸 slug 去重、
+   分池、`componentType`、扫码状态机、401 自愈三格判据）；(c) `bun run check` 的
+   入口形状与依赖方向门禁通过。**未做**的是把一次真实扫码登录、一次真实对话、一次
+   真实签到跑通并比对上游返回值。
+19. **AStudio 的 401 自愈写回依赖「宿主调用 loader.fetch 时给 `(url, init)`」**。
+   AI SDK 的 openai-compatible 走这个形状；若宿主某天改传 `Request`，自愈链会按
+   设计放弃重试、原样交还 401（功能退化为「需重新登录」，不会出错），届时应补
+   `Request` 形态的克隆重试。
+20. **AStudio 积分到期串的时区未验证**：`*NextExpireTime` 是不带时区的本地时间串，
+   本包按**运行机器的时区**解析。服务端时区只有与官方客户端面板在不同时区的两台
+   机器上各比对一次才能定论；在此之前到期日可能与官方面板差若干小时。
+21. **AStudio 的短信/密码登录未接入**：客户端那两条路要过极验（GeeTest），JS 桥的
+   稳定性与厂商常量的出处都还需要取证；当前唯一登录方式是微信扫码（SSO），它不依赖
+   任何厂商常量。若某用户的微信无法开通 AStudio（需先在客户端绑定手机号），当前
+   没有替代登录路径。
+22. **AStudio 的 OpenCode 入口未在真实 OpenCode 里验证**：它依赖与 Loomy/Raccoon
+   相同的两个前提（V2 的 provider.transform 与 integration OAuth authorize 形状），
+   另有本包自己的一条：`http.request` 注入的 `token` 冗余头（适配器为 Loomy 加的）
+   对推理网关无害但未实测。
 
 发现与上述不符的现象时：先改 `src/vendors/<id>/product.ts` 的常量与本文档，
 再补一条回归测试；不要只改实现不留证据。

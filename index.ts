@@ -11,6 +11,7 @@
  * options object is shared by all of them (see `docs/architecture.md`).
  */
 
+export { AstudioAuthPlugin } from "./src/vendors/astudio/index.ts"
 export { LoomyAuthPlugin } from "./src/vendors/loomy/index.ts"
 export { RaccoonAuthPlugin } from "./src/vendors/raccoon/index.ts"
 export { TraeAuthPlugin } from "./src/vendors/trae/index.ts"
