@@ -39,7 +39,11 @@ import {
   sendSmsCode,
   type WechatAccount,
 } from "./api.ts"
-import { ASTUDIO_QR_POLL_INTERVAL_MS, ASTUDIO_SIGN_IN_TIMEOUT_MS } from "./product.ts"
+import {
+  ASTUDIO_QR_POLL_INTERVAL_MS,
+  ASTUDIO_SIGN_IN_TIMEOUT_MS,
+  ASTUDIO_SSO_SESSION_TTL_MS,
+} from "./product.ts"
 import { maskIfPhone } from "./session.ts"
 
 /** 极验官方 v3 SDK（载体页顶层加载；CSP 白名单放行 geetest/geevisit 两个域）。 */
@@ -144,13 +148,33 @@ interface WechatFlow {
   fail(message: string): void
 }
 
-/** 登录成功时宿主存下的形状（API key；Cookie 四件套随结果交付进 metadata）。 */
+/**
+ * 登录成功时宿主存下的形状 —— 必须是 **OAuth 形状**（`access` + `refresh` + `expires`）。
+ *
+ * ## ⚠️ 为什么不能只给 `key`（2026-10-22 用户实测的真实缺陷）
+ *
+ * 本包登录成功后，宿主 magpie 实存的是 `{type:"api", key}` —— **扩展字段全被
+ * 丢掉了**（`ssoSessionId`/`token`/`accountId`/`nickname` 一个不剩），于是
+ * `usage`/`checkin` 读不到控制面 Cookie，账号卡片显示「账号里没有登录会话
+ * Cookie，请重新登录」。对照同一台机器上 Loomy/Raccoon/TRAE 的实存形状：全都是
+ * `type:"oauth"` 且扩展字段**在顶层**（`accountId`/`phone`/`dailyQuota`/`machineId`…）。
+ * 差别就在登录结果里有没有 `refresh`：**API key 形状只保留 `key`，OAuth 形状
+ * 保留顶层扩展字段**（`docs/architecture.md` §4.6）。而 AStudio 的自愈与额度
+ * 全部依赖 Cookie 四件套，丢了它们账号就是死的。
+ *
+ * ⇒ 按 Loomy 同款：给 `access`（活体模型凭据）+ `refresh: ""`（**仅为标记存储
+ * 形状**，AStudio 没有续期端点，本包也没有 `auth.refresh` 钩子）+ 一个正数
+ * `expires`（SSO 会话的实测 Max-Age，见 `ASTUDIO_SSO_SESSION_TTL_MS`）。
+ * ⚠️ 不要改回 `key`。
+ */
 function signInResultOf(session: Session, loginMethod: string): SignInResult {
   const labelSource = session.nickname ?? session.mobile ?? session.accountId ?? session.uid
   const label = labelSource === undefined ? "AStudio 账号" : maskIfPhone(labelSource)
   return {
     type: "success",
-    key: session.accessToken,
+    access: session.accessToken,
+    refresh: "",
+    expires: Date.now() + ASTUDIO_SSO_SESSION_TTL_MS,
     accountId: label,
     uid: session.uid ?? "",
     ...(session.ssoSessionId === undefined ? {} : { ssoSessionId: session.ssoSessionId }),

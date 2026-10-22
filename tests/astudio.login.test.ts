@@ -177,7 +177,13 @@ describe("loginMethods", () => {
     expect(loginPage.ok).toBe(true)
     const result = await started.callback()
     if (result.type !== "success") throw new Error(`期望成功，实际 ${JSON.stringify(result)}`)
-    expect(result.key).toBe("bearer-1")
+    // ⚠️ OAuth 形状（access + refresh + expires）：只给 key 会被宿主丢光扩展字段，
+    // Cookie 四件套就读不到了（2026-10-22 实测的账号死因）。
+    expect(result.access).toBe("bearer-1")
+    expect(result.refresh).toBe("")
+    expect(typeof result.expires).toBe("number")
+    expect(result.expires as number).toBeGreaterThan(Date.now())
+    expect(result.key).toBeUndefined()
     expect(result.uid).toBe("u-sms")
     expect(result.ssoSessionId).toBe("tok-sms")
     expect(result.token).toBe("tok-sms")
@@ -252,8 +258,9 @@ describe("微信扫码状态机", () => {
     const result = await started.callback()
     if (result.type !== "success") throw new Error(`期望成功，实际 ${JSON.stringify(result)}`)
     // 只有 key：无 refresh token ⇒ 宿主按 API key 形状存，Cookie 四件套随结果交付。
-    expect(result.key).toBe("bearer-1")
-    expect(result.refresh).toBeUndefined()
+    expect(result.access).toBe("bearer-1")
+    expect(result.refresh).toBe("")
+    expect(result.key).toBeUndefined()
     expect(result.accountId).toBe("测试昵称")
     expect(result.uid).toBe("u-1")
     expect(result.ssoSessionId).toBe("tok-1")

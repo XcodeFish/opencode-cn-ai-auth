@@ -185,6 +185,55 @@ describe("loader", () => {
   })
 })
 
+describe("存储形状闭环（0.9.9 回归钉）", () => {
+  // 宿主 magpie 实存的 OAuth 形状：扩展字段在**顶层**（Cookie 四件套就在这里）。
+  const OAUTH_SHAPE: StoredAuth = {
+    type: "oauth",
+    access: "bearer-1",
+    refresh: "",
+    expires: Date.now() + 365 * 24 * 3600 * 1000,
+    accountId: "138****1234",
+    uid: "u-1",
+    ssoSessionId: "sid-1",
+    token: "tok-1",
+    loginMethod: "wechat",
+  }
+
+  test("OAuth 形状（宿主实存形状）下 usage 能读到控制面 Cookie", async () => {
+    const rig = await rigWith(OAUTH_SHAPE, [
+      {
+        match: "points/balance",
+        respond: jsonOk({ code: 0, data: { totalBalance: 1234, totalAmount: 2000 } }),
+      },
+    ])
+    try {
+      const report = await rig.usage()
+      expect(report.balance).toBe("1234 积分")
+      expect(report.signIn).toBeUndefined()
+      // Cookie 真的发出去了（四键同发）。
+      const call = at(rig.driver.callsMatching("points/balance"), 0)
+      expect(String(headersOf(call).Cookie)).toContain("ssoSessionId=sid-1")
+    } finally {
+      rig.restore()
+    }
+  })
+
+  test("key-only 形状（0.9.8 及以前宿主实存的样子）如实报缺 Cookie，不静默给 0", async () => {
+    const rig = await rigWith({ type: "api", key: "bearer-1" }, [
+      { match: "points/balance", respond: jsonOk({ code: 0, data: { totalBalance: 1234 } }) },
+    ])
+    try {
+      const report = await rig.usage()
+      expect(report.signIn).toBe("expired")
+      expect(report.error).toContain("Cookie")
+      // 没有 Cookie 就不该去打控制面（那必然 80000）。
+      expect(rig.driver.callsMatching("points/balance")).toHaveLength(0)
+    } finally {
+      rig.restore()
+    }
+  })
+})
+
 describe("shouldRetryUnauthorized", () => {
   test("三格判据：非 401 不重试；已试过不重试；换到不同凭据才重试", () => {
     expect(shouldRetryUnauthorized(500, false, "new", "old")).toBe(false)

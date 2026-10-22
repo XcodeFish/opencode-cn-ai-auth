@@ -137,6 +137,18 @@ export const ASTUDIO_QR_EXPIRES_MS = 300_000
 /** 扫码状态轮询间隔（SSO `uids` 是立即返回的短轮询，不是长轮询）。 */
 export const ASTUDIO_QR_POLL_INTERVAL_MS = 2_000
 
+/**
+ * SSO 会话的寿命：一年（服务端 `Set-Cookie: ssoSessionId=…; Max-Age=31536000`，
+ * 且**不滑动** —— JetHub 2026-10-10 实测抄录）。
+ *
+ * ⚠️ 这不是模型 token 的 TTL：磁盘会话与 `modelBearerToken` 都没有到期字段，
+ * 唯一失效信号仍是推理端点的 HTTP 401（`index.ts` 的 401 自愈链）。这里登记它
+ * 只为一件事：登录结果需要一个 `expires > 0` 才能被宿主按 **OAuth 形状**存储
+ *（`refresh: ""` + `expires`）—— 那是扩展字段（Cookie 四件套）**唯一**能存活
+ * 的存储形状，见 `login.ts` 的 `signInResultOf`。
+ */
+export const ASTUDIO_SSO_SESSION_TTL_MS = 365 * 24 * 60 * 60 * 1000
+
 /** 一次登录流程的总时长上限，到点判失败并关闭本地页。 */
 export const ASTUDIO_SIGN_IN_TIMEOUT_MS = 10 * 60 * 1000
 

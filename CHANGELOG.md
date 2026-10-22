@@ -2,6 +2,29 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.9] - 2026-10-22
+
+### Fixed
+
+- **AStudio 账号登上了但额度/签到全是「账号里没有登录会话 Cookie」（用户实测）**。
+  查宿主实存形状得到铁证：astudio 是 `{type:"api", key}` —— **扩展字段一个不剩**
+  （同一台机器上 Loomy/Raccoon/TRAE 全是 `type:"oauth"` 且扩展字段在顶层）。
+  根因是登录结果只给了 `key` 而**没有 `refresh`**：宿主对 API key 形状只保留
+  `key`，对 OAuth 形状才保留顶层扩展字段（`docs/architecture.md` §4.6），而
+  AStudio 的额度、签到、401 自愈全部依赖 Cookie 四件套 ⇒ 账号成了死的。
+  现在按 Loomy 同款返回 OAuth 形状：`access` + `refresh: ""`（**仅为标记存储
+  形状**，AStudio 无续期端点、本包也没有 `auth.refresh` 钩子）+ 正数 `expires`
+  （SSO 会话的实测 Max-Age=31536000，见 `ASTUDIO_SSO_SESSION_TTL_MS` 的出处）。
+- ⚠️ **已登录的旧账号必须重新登录一次**：那条记录只剩 `key`，Cookie 无从恢复
+  （`magpie plugin logout astudio` 后重新 `plugin login astudio`；旧的死记录会
+  让新账号落到 `astudio#xxxx` 槽位，所以先 logout 更干净）。
+
+### Added
+
+- 存储形状闭环回归钉（`tests/astudio.plugin.test.ts`）：用宿主实存的 OAuth 形状
+  驱动 `usage`，断言 Cookie 四件套真的发出去了；再用 key-only 形状断言「如实报
+  缺 Cookie 且**不打**必然失败的控制面请求」。
+
 ## [0.9.8] - 2026-10-22
 
 ### Fixed
