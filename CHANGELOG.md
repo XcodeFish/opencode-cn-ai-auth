@@ -2,6 +2,23 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.7] - 2026-10-22
+
+### Fixed
+
+- **AStudio 点「完成安全验证」完全没反应（用户实测，0.9.6 沙箱方案的修正）**。
+  0.9.6 把极验滑块搬进沙箱 iframe 绕开了基座默认 CSP，但 GeeTest v3 在**不透明
+  origin** 的沙箱里不可靠：滑块弹层被 iframe 视口裁剪、就绪时序与 postMessage
+  往返都增加失败面 —— 实测就是「点了没反应」（错误只写在页面底部状态条，不在
+  视野内）。现改为**与 JetHub 载体页同款**：滑块跑在顶层页面，载体页自带白名单
+  CSP（`PageResponse.contentSecurityPolicy`，基座支持的通道）只多放行极验两个
+  公开域 `*.geetest.com` / `*.geevisit.com`；`default-src 'none'`、
+  `form-action 'none'`、`frame-ancestors 'none'`、`connect-src 'self'` 全部保留。
+  同时删掉两个空白 380px 的沙箱 iframe（UI 上的大空档消失）。
+- **失败原因写在按钮旁**（`cn-captcha-box`）而不只是底部状态条 —— 页面滚动后
+  状态条常在视野外，这是「点击没反应」观感的直接来源。40s 超时、SDK 静态+动态
+  双重加载、一次一枚验证（pending 期间忽略重复点击）都保留。
+
 ## [0.9.6] - 2026-10-22
 
 ### Fixed

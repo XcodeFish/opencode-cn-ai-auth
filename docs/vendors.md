@@ -740,6 +740,15 @@ Trae 也提供 OpenCode V2 子入口（`opencode/trae.ts`）。它与另两家�
   `gt.js`（`static.geetest.com/static/tools/gt.js`），回执三件套
   （challenge/validate/seccode）交回插件再转发厂商；`geetest_seccode` 先 base64
   再入表单（JetHub 逐字一致）。
+- **载体页自带白名单 CSP**（`PageResponse.contentSecurityPolicy` 覆盖基座默认值）：
+  基座默认 `script-src 'unsafe-inline'` 会**静默拦掉外部 gt.js**（2026-10-22 实测：
+  同机 curl 正常、浏览器里静态+动态两次加载全失败）。基座原本的替代方案是「厂商
+  SDK 跑在沙箱 iframe」，但 GeeTest v3 在**不透明 origin** 的沙箱里不可靠（弹层被
+  iframe 视口裁剪、就绪时序与 postMessage 往返增加失败面，实测「点击没反应」）⇒
+  改为 JetHub 同款：滑块跑**顶层页面**，页面 CSP 只多放行极验两个公开域
+  （`*.geetest.com` / `*.geevisit.com`），`default-src 'none'`、`form-action 'none'`、
+  `frame-ancestors 'none'` 与 `connect-src 'self'` 都保留；该页面按设计不持有任何
+  凭据（只发手机号/账号/滑块回执），故放行收益大于风险。
 - `code:0` 但列表为空 = **该微信号尚未开通 AStudio**（信封的 `desc:"成功"` 只是请求
   状态）：文案指向「先在 AStudio 客户端里登录并绑定手机号完成开通」，不叫用户重扫
   ——同一个号再扫还是空（JetHub 2026-10-20 报障实录）。
