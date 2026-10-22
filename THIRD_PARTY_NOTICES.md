@@ -10,8 +10,8 @@ contributors）。
 
 ## 二维码编码器 `src/core/qr.ts`（移植）
 
-- **来源**：JetHub 插件包 `dsh-codearts-auth` v0.4.2（本地检出路径
-  `/Users/guobinbin/.dsh/plugin-src/Jet-Hub`）的 `src/raccoon-qr.ts`。
+- **来源**：JetHub 插件包 `dsh-codearts-auth` v0.4.2（本地检出）的
+  `src/raccoon-qr.ts`。
 - **来源许可**：MIT，Copyright (c) 2026 Jet（见 JetHub 包内 `LICENSE`）。
 - **移植方式**：按本包的命名与注释习惯重写，算法未改；来源文件声明算法依据
   ISO/IEC 18004，结构与 Nayuki 的 MIT 参考实现一致。
