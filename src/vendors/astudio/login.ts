@@ -483,42 +483,47 @@ async function carrierGet(flow: CarrierFlow, request: PageRequest): Promise<Page
   return undefined
 }
 
-/** 载体页的 POST 路由：发短信、短信登录、密码登录（全部由插件代理厂商请求）。 */
+/** 载体页的 POST 路由分发：发短信、短信登录、密码登录（全部由插件代理厂商请求）。 */
 async function carrierPost(flow: CarrierFlow, request: PageRequest): Promise<PageResponse> {
   const body = await request.json()
-
-  if (request.path === "/sms/send") {
-    const phone = mainlandPhone(typeof body.mobile === "string" ? body.mobile : undefined)
-    if (phone === undefined) return jsonFail("请输入有效的 11 位手机号")
-    const captcha = captchaOf(body)
-    if (captcha === undefined) return jsonFail("请先完成人机安全验证")
-    const sent = await sendSmsCode(flow.deps.fetcher, { mobile: phone, countryCode: "86", captcha })
-    return sent.ok ? jsonOk({ message: `验证码已发送到 ${maskPhone(phone)}` }) : jsonFail(sent.message)
-  }
-
-  if (request.path === "/sms/login") {
-    const phone = mainlandPhone(typeof body.mobile === "string" ? body.mobile : undefined)
-    const code = typeof body.verifyCode === "string" ? body.verifyCode.trim() : ""
-    if (phone === undefined) return jsonFail("请输入有效的 11 位手机号")
-    if (code.length === 0) return jsonFail("请输入短信验证码")
-    const login = await loginWithSms(flow.deps.fetcher, { mobile: phone, verifyCode: code })
-    if (!login.ok) return jsonFail(login.message)
-    return await settleIdentity(flow, login.identity)
-  }
-
-  if (request.path === "/password/login") {
-    const accountName = typeof body.accountName === "string" ? body.accountName.trim() : ""
-    const accountPwd = typeof body.accountPwd === "string" ? body.accountPwd : ""
-    const captcha = captchaOf(body)
-    if (accountName.length === 0) return jsonFail("请输入账号或手机号")
-    if (accountPwd.length === 0) return jsonFail("请输入密码")
-    if (captcha === undefined) return jsonFail("请先完成人机安全验证")
-    const login = await loginWithPassword(flow.deps.fetcher, { accountName, accountPwd, captcha })
-    if (!login.ok) return jsonFail(login.message)
-    return await settleIdentity(flow, login.identity)
-  }
-
+  if (request.path === "/sms/send") return await smsSend(flow.deps, body)
+  if (request.path === "/sms/login") return await smsLogin(flow, body)
+  if (request.path === "/password/login") return await passwordLogin(flow, body)
   return notFound()
+}
+
+/** 发送短信验证码：手机号与极验回执校验后由插件转发厂商。 */
+async function smsSend(deps: AstudioLoginDeps, body: Record<string, unknown>): Promise<PageResponse> {
+  const phone = mainlandPhone(typeof body.mobile === "string" ? body.mobile : undefined)
+  if (phone === undefined) return jsonFail("请输入有效的 11 位手机号")
+  const captcha = captchaOf(body)
+  if (captcha === undefined) return jsonFail("请先完成人机安全验证")
+  const sent = await sendSmsCode(deps.fetcher, { mobile: phone, countryCode: "86", captcha })
+  return sent.ok ? jsonOk({ message: `验证码已发送到 ${maskPhone(phone)}` }) : jsonFail(sent.message)
+}
+
+/** 短信验证码登录：快速登录换身份 → 收尾三步换凭据。 */
+async function smsLogin(flow: CarrierFlow, body: Record<string, unknown>): Promise<PageResponse> {
+  const phone = mainlandPhone(typeof body.mobile === "string" ? body.mobile : undefined)
+  const code = typeof body.verifyCode === "string" ? body.verifyCode.trim() : ""
+  if (phone === undefined) return jsonFail("请输入有效的 11 位手机号")
+  if (code.length === 0) return jsonFail("请输入短信验证码")
+  const login = await loginWithSms(flow.deps.fetcher, { mobile: phone, verifyCode: code })
+  if (!login.ok) return jsonFail(login.message)
+  return await settleIdentity(flow, login.identity)
+}
+
+/** 账号密码登录：极验回执校验后 check-account → 收尾三步换凭据。 */
+async function passwordLogin(flow: CarrierFlow, body: Record<string, unknown>): Promise<PageResponse> {
+  const accountName = typeof body.accountName === "string" ? body.accountName.trim() : ""
+  const accountPwd = typeof body.accountPwd === "string" ? body.accountPwd : ""
+  const captcha = captchaOf(body)
+  if (accountName.length === 0) return jsonFail("请输入账号或手机号")
+  if (accountPwd.length === 0) return jsonFail("请输入密码")
+  if (captcha === undefined) return jsonFail("请先完成人机安全验证")
+  const login = await loginWithPassword(flow.deps.fetcher, { accountName, accountPwd, captcha })
+  if (!login.ok) return jsonFail(login.message)
+  return await settleIdentity(flow, login.identity)
 }
 
 /** 跑一次三合一登录：本地页 + 微信泵 + 短信/密码代理。 */
