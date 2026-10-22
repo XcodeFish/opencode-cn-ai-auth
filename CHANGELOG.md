@@ -2,6 +2,26 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.6] - 2026-10-22
+
+### Fixed
+
+- **AStudio 极验滑块在真实浏览器里彻底拉不起来（连 0.9.5 的动态兜底也 404 级失败，
+  用户实测）**。真正的根因不在网络：本包 `core/local-page.ts` 给每个登录页默认加
+  **CSP `script-src 'unsafe-inline'`** —— 只放行内联脚本，**外部 gt.js 被浏览器
+  静默拦截**，静态与动态两次加载必然全失败；而同机 curl 一切正常（HTTP 200、
+  9.6KB、0.1s），JetHub 载体页（无 CSP）也正常。这正是基座的既定架构：**厂商
+  浏览器 SDK 必须跑在自带宽松 CSP 的沙箱 iframe 里**（Raccoon 的阿里云滑块就是
+  这个模式），而不是往父页塞 vendor script——父页的 `scripts` 通道会被默认
+  CSP 拦掉，两者是自相矛盾的设计（本次踩空暴露）。
+- 修法照 Raccoon 模式：极验滑块整体搬进沙箱 frame（独立文档
+  `/gee-frame`，CSP `script-src 'unsafe-inline' https:`，加载 gt.js）；父页拉
+  极验配置后 `postMessage` 送入 frame（frame 是 opaque origin 读不到本机
+  API），frame 把回执三件套 `emit` 回来；父页校验 `event.source` 必须是本页的
+  frame 且 `event.origin === "null"`（防其它本机 frame 投递）。短信/密码两个
+  Tab 各有一个 frame 槽位，`pendingSlot` 决定回执归属；40s 超时、错误路径全部
+  复位可重试。父页的 vendor script 标签移除（SDK 只在 frame 里）。
+
 ## [0.9.5] - 2026-10-22
 
 ### Fixed

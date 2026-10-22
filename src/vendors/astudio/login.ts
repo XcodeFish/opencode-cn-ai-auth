@@ -21,7 +21,13 @@
 import { errorMessage } from "../../core/errors.ts"
 import { httpBytes } from "../../core/http.ts"
 import { notFound, type PageRequest, type PageResponse, PageServer } from "../../core/local-page.ts"
-import { jsonFail, jsonOk, renderLoginPage } from "../../core/login-page.ts"
+import {
+  jsonFail,
+  jsonOk,
+  renderLoginPage,
+  renderSandboxedScriptFrame,
+  renderSandboxedScriptPage,
+} from "../../core/login-page.ts"
 import type { AuthMethod, PluginClient, SignInResult } from "../../core/types.ts"
 import { createSettlement, mainlandPhone, maskPhone, sleep } from "../../core/util.ts"
 import {
@@ -41,6 +47,63 @@ import {
 } from "./api.ts"
 import { ASTUDIO_QR_POLL_INTERVAL_MS, ASTUDIO_SIGN_IN_TIMEOUT_MS } from "./product.ts"
 import { maskIfPhone } from "./session.ts"
+
+/** 极验官方 v3 SDK（沙箱 frame 文档里加载；父页 CSP 不放行外部脚本，见 base 约定）。 */
+const GEE_TEST_SDK_URL = "https://static.geetest.com/static/tools/gt.js"
+
+/**
+ * 沙箱 frame 的引导脚本：等父页把极验配置 postMessage 进来（frame 是不透明
+ * origin，读不到本机 API，配置必须由父页送入），跑 initGeetest 滑块，把回执
+ * 三件套 emit 回父页。`started` 一次只跑一枚验证，错误路径都复位以便重试。
+ */
+const GEE_FRAME_BOOTSTRAP = `
+  function emit(value) { window.parent.postMessage(value, "*"); }
+  var started = false;
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var data = event.data || {};
+    if (data.type !== "cn-ai-geetest-start" || started) return;
+    if (typeof window.initGeetest !== "function") {
+      emit({ type: "cn-ai-geetest-result", ok: false, message: "安全验证组件未加载，请刷新重试" });
+      return;
+    }
+    started = true;
+    var c = data.config || {};
+    window.initGeetest({
+      gt: c.gt, challenge: c.challenge, success: c.success, new_captcha: c.newCaptcha,
+      https: true, offline: !c.success, product: "bind", width: "100%"
+    }, function (captchaObj) {
+      captchaObj.onReady(function () {
+        try { captchaObj.verify(); } catch (e) {
+          started = false;
+          emit({ type: "cn-ai-geetest-result", ok: false, message: "安全验证启动失败，请重试" });
+        }
+      });
+      captchaObj.onError(function () {
+        started = false;
+        emit({ type: "cn-ai-geetest-result", ok: false, message: "安全验证网络异常，请稍后重试" });
+      });
+      if (captchaObj.onClose) captchaObj.onClose(function () {
+        started = false;
+        emit({ type: "cn-ai-geetest-result", ok: false, message: "安全验证已取消" });
+      });
+      captchaObj.onSuccess(function () {
+        var val = captchaObj.getValidate();
+        started = false;
+        if (!val || !val.geetest_challenge || !val.geetest_validate || !val.geetest_seccode) {
+          emit({ type: "cn-ai-geetest-result", ok: false, message: "安全验证结果无效，请重试" });
+          return;
+        }
+        emit({ type: "cn-ai-geetest-result", ok: true, payload: {
+          geetestChallenge: val.geetest_challenge,
+          geetestValidate: val.geetest_validate,
+          geetestSeccode: val.geetest_seccode
+        } });
+      });
+    });
+  });
+  emit({ type: "cn-ai-geetest-ready", ok: typeof window.initGeetest === "function" });
+`
 
 export interface AstudioLoginDeps {
   options: Record<string, unknown>
@@ -245,6 +308,7 @@ function renderCarrierPage(state: FlowState): string {
     <label>人机验证</label>
     <button class="cn-btn" id="cn-sms-captcha-btn" type="button">完成安全验证</button>
     <div class="cn-captcha-box" id="cn-sms-captcha-box"></div>
+    ${renderSandboxedScriptFrame({ id: "cn-captcha-frame-sms", title: "极验安全验证", path: "gee-frame" })}
     <label for="cn-sms-code">验证码</label>
     <div class="cn-row">
       <input id="cn-sms-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
@@ -262,6 +326,7 @@ function renderCarrierPage(state: FlowState): string {
     <label>人机验证</label>
     <button class="cn-btn" id="cn-pwd-captcha-btn" type="button">完成安全验证</button>
     <div class="cn-captcha-box" id="cn-pwd-captcha-box"></div>
+    ${renderSandboxedScriptFrame({ id: "cn-captcha-frame-pwd", title: "极验安全验证", path: "gee-frame" })}
     <button class="cn-btn cn-go" id="cn-pwd-login" type="button">登 录</button>
   </div>
 
@@ -297,87 +362,66 @@ function renderCarrierPage(state: FlowState): string {
   }, 1200);
 
   // 极验滑块：配置由本机代理下发（不含任何凭据），回执三件套交回插件转发。
-  // ⚠️ SDK 双重加载（静态标签 + 动态兜底，JetHub 同款）：静态 gt.js 可能在弱网/
-  // 代理下加载失败（2026-10-22 用户实测 initGeetest is not a function），用前必须
-  // 动态确认；失败后 promise 复位，下一次点击可重试。
-  var gtScriptPromise = null;
-  function ensureGeetestSdk() {
-    if (typeof window.initGeetest === "function") return Promise.resolve();
-    if (gtScriptPromise) return gtScriptPromise;
-    gtScriptPromise = new Promise(function (resolve, reject) {
-      var script = document.createElement("script");
-      script.src = "https://static.geetest.com/static/tools/gt.js";
-      script.async = true;
-      script.addEventListener("load", function () { resolve(); }, { once: true });
-      script.addEventListener("error", function () {
-        script.remove();
-        gtScriptPromise = null;
-        reject(new Error("安全验证组件加载失败，请检查网络后重试。"));
-      }, { once: true });
-      document.head.appendChild(script);
-    });
-    return gtScriptPromise;
-  }
-  function triggerGeetest() {
-    return new Promise(function (resolve, reject) {
-      var finished = false;
-      var instance = null;
-      var timer = setTimeout(function () { finish({ error: new Error("安全验证超时，请重试") }); }, 30000);
-      function finish(result) {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        try { if (instance && instance.destroy) instance.destroy(); } catch (_) {}
-        if ("payload" in result) resolve(result.payload); else reject(result.error);
-      }
-      // ⚠️ 必须用相对路径：本地页 URL 带随机前缀（/<token>/），绝对路径
-      // /gee-captcha 会把前缀丢掉，命中 404 "Not found" —— 页面报
-      // Unexpected token 'N'，"Not found" is not valid JSON（2026-10-22 用户实测）。
-      // cnPost/cnPoll 的参数本来就是相对路径，唯独这里的原生 fetch 写成了绝对
-      // —— 与 Loomy/Raccoon 页面的约定对齐。
-      ensureGeetestSdk().then(function () {
-        if (typeof window.initGeetest !== "function") throw new Error("安全验证组件不可用，请稍后重试。");
-        return fetch("gee-captcha");
-      }).then(function (r) { return r.json(); }).then(function (json) {
-        if (!json.ok || !json.config) throw new Error(json.message || "获取安全验证配置失败");
-        var c = json.config;
-        window.initGeetest({
-          gt: c.gt, challenge: c.challenge, success: c.success, new_captcha: c.newCaptcha,
-          https: true, offline: !c.success, product: "bind", width: "100%"
-        }, function (captchaObj) {
-          instance = captchaObj;
-          captchaObj.onReady(function () { try { captchaObj.verify(); } catch (_) { finish({ error: new Error("安全验证启动失败，请重试") }); } });
-          captchaObj.onError(function () { finish({ error: new Error("安全验证网络异常，请稍后重试") }); });
-          if (captchaObj.onClose) captchaObj.onClose(function () { finish({ error: new Error("安全验证已取消") }); });
-          captchaObj.onSuccess(function () {
-            var val = captchaObj.getValidate();
-            if (!val || !val.geetest_challenge || !val.geetest_validate || !val.geetest_seccode) {
-              finish({ error: new Error("安全验证结果无效，请重试") });
-              return;
-            }
-            finish({ payload: {
-              geetestChallenge: val.geetest_challenge,
-              geetestValidate: val.geetest_validate,
-              geetestSeccode: val.geetest_seccode
-            } });
-          });
-        });
-      }).catch(function (e) { finish({ error: e instanceof Error ? e : new Error(String(e)) }); });
-    });
-  }
-  function setupCaptcha(triggerId, boxId, store) {
-    document.getElementById(triggerId).addEventListener("click", function () {
-      var btn = document.getElementById(triggerId);
-      btn.disabled = true; btn.textContent = "正在拉起验证…";
-      triggerGeetest().then(function (captcha) {
-        store(captcha);
-        document.getElementById(boxId).textContent = "✓ 已完成安全验证";
-      }).catch(function (e) {
-        btn.disabled = false; btn.textContent = "验证失败，重试";
-        cnStatus("cn-status", e.message || "安全验证失败", "err");
+  // 极验滑块跑在沙箱 frame 里（frame 文档自带放行厂商 SDK 的 CSP；父页 CSP 不放行
+  // 外部脚本——这是基座的安全约定，Raccoon 的阿里云滑块同款）。父页拉配置
+  // postMessage 进 frame，frame 把回执三件套 emit 回来；message 校验 source 必须
+  // 是我们的 frame（sandbox 无 allow-same-origin ⇒ origin 是 opaque "null"）。
+  var smsFrame = document.getElementById("cn-captcha-frame-sms");
+  var pwdFrame = document.getElementById("cn-captcha-frame-pwd");
+  var pendingSlot = null, pendingFinish = null;
+  window.addEventListener("message", function (event) {
+    var fromOurs =
+      (smsFrame && event.source === smsFrame.contentWindow) ||
+      (pwdFrame && event.source === pwdFrame.contentWindow);
+    if (!fromOurs || event.origin !== "null") return;
+    var data = event.data || {};
+    if (data.type === "cn-ai-geetest-ready" && data.ok !== true) {
+      cnStatus("cn-status", "安全验证组件未加载，请刷新页面重试", "err");
+      return;
+    }
+    if (data.type !== "cn-ai-geetest-result" || pendingFinish === null) return;
+    var finish = pendingFinish;
+    pendingSlot = null;
+    pendingFinish = null;
+    finish(data);
+  });
+  function triggerGeetest(slot, boxId) {
+    if (pendingFinish !== null) {
+      cnStatus("cn-status", "安全验证进行中，请稍候", "err");
+      return;
+    }
+    var btn = document.getElementById("cn-" + slot + "-captcha-btn");
+    var box = document.getElementById(boxId);
+    btn.disabled = true; btn.textContent = "正在拉起验证…";
+    cnStatus("cn-status", "", "");
+    fetch("gee-captcha").then(function (r) { return r.json(); }).then(function (json) {
+      if (!json.ok || !json.config) throw new Error(json.message || "获取安全验证配置失败");
+      return new Promise(function (resolve, reject) {
+        var timer = setTimeout(function () {
+          finish({ ok: false, message: "安全验证超时，请重试" });
+        }, 40000);
+        function finish(result) {
+          clearTimeout(timer);
+          pendingSlot = null; pendingFinish = null;
+          btn.disabled = false; btn.textContent = "完成安全验证";
+          if (result.ok) {
+            box.textContent = "✓ 已完成安全验证";
+            resolve(result.payload);
+          } else {
+            reject(new Error(result.message || "安全验证失败"));
+          }
+        }
+        pendingSlot = slot;
+        pendingFinish = finish;
+        var frame = slot === "sms" ? smsFrame : pwdFrame;
+        frame.contentWindow.postMessage({ type: "cn-ai-geetest-start", config: json.config }, "*");
       });
+    }).catch(function (e) {
+      btn.disabled = false; btn.textContent = "完成安全验证";
+      cnStatus("cn-status", e.message || "安全验证失败", "err");
     });
   }
+  var smsCaptcha = null, pwdCaptcha = null;
   var smsCaptcha = null, pwdCaptcha = null;
   setupCaptcha("cn-sms-captcha-btn", "cn-sms-captcha-box", function (c) { smsCaptcha = c; });
   setupCaptcha("cn-pwd-captcha-btn", "cn-pwd-captcha-box", function (c) { pwdCaptcha = c; });
@@ -435,8 +479,6 @@ function renderCarrierPage(state: FlowState): string {
     accent: "#1f6feb",
     body,
     script,
-    // 极验官方滑块 SDK（厂商自己的公开脚本；vendor scripts 通道）。
-    scripts: ["https://static.geetest.com/static/tools/gt.js"],
   })
 }
 
@@ -508,6 +550,14 @@ async function carrierGet(flow: CarrierFlow, request: PageRequest): Promise<Page
   if (request.path === "/gee-captcha") {
     const config = await fetchGeetestConfig(flow.deps.fetcher)
     return config.ok ? jsonOk({ config: config.config }) : jsonFail(config.message)
+  }
+  // 极验滑块沙箱：独立文档 + 自带放行厂商 SDK 的 CSP（父页 CSP 不放行外部脚本）。
+  if (request.path === "/gee-frame") {
+    return renderSandboxedScriptPage({
+      source: GEE_TEST_SDK_URL,
+      body: '<div id="cn-captcha"></div>',
+      bootstrap: GEE_FRAME_BOOTSTRAP,
+    })
   }
   return undefined
 }

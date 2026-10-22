@@ -111,12 +111,22 @@ describe("loginMethods", () => {
     expect(html).toContain("cn-tab-sms")
     expect(html).toContain("cn-tab-pwd")
     expect(html).toContain("cn-tab-qr")
-    expect(html).toContain("static.geetest.com/static/tools/gt.js")
+    // 极验 SDK 在沙箱 frame 里（父页 CSP 不放行外部脚本——基座安全约定）。
+    expect(html).toContain('src="gee-frame"')
+    expect(html).not.toContain("static.geetest.com")
     expect(html).toContain("未注册手机号验证通过后将自动完成注册开户")
     // 页面自取必须用相对路径：URL 带随机前缀，绝对路径会 404 "Not found"
     //（2026-10-22 用户实测「Unexpected token 'N'」的根因）。
     expect(html).toContain('fetch("gee-captcha")')
     expect(html).not.toContain('fetch("/gee-captcha")')
+
+    // 沙箱 frame 文档：自带放行厂商 SDK 的 CSP（响应头），加载 gt.js 并等父页送入配置。
+    const frameResp = await fetch(new URL("gee-frame", started.url ?? ""))
+    expect(frameResp.headers.get("content-security-policy")).toContain("sandbox allow-scripts")
+    expect(frameResp.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline' https:")
+    const framePage = await frameResp.text()
+    expect(framePage).toContain("static.geetest.com/static/tools/gt.js")
+    expect(framePage).toContain("cn-ai-geetest-start")
   })
 
   test("短信登录端到端：极验配置代理 → 发送（multipart+seccode base64）→ 快速登录 → 收尾换凭据", async () => {
