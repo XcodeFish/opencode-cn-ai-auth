@@ -297,6 +297,27 @@ function renderCarrierPage(state: FlowState): string {
   }, 1200);
 
   // 极验滑块：配置由本机代理下发（不含任何凭据），回执三件套交回插件转发。
+  // ⚠️ SDK 双重加载（静态标签 + 动态兜底，JetHub 同款）：静态 gt.js 可能在弱网/
+  // 代理下加载失败（2026-10-22 用户实测 initGeetest is not a function），用前必须
+  // 动态确认；失败后 promise 复位，下一次点击可重试。
+  var gtScriptPromise = null;
+  function ensureGeetestSdk() {
+    if (typeof window.initGeetest === "function") return Promise.resolve();
+    if (gtScriptPromise) return gtScriptPromise;
+    gtScriptPromise = new Promise(function (resolve, reject) {
+      var script = document.createElement("script");
+      script.src = "https://static.geetest.com/static/tools/gt.js";
+      script.async = true;
+      script.addEventListener("load", function () { resolve(); }, { once: true });
+      script.addEventListener("error", function () {
+        script.remove();
+        gtScriptPromise = null;
+        reject(new Error("安全验证组件加载失败，请检查网络后重试。"));
+      }, { once: true });
+      document.head.appendChild(script);
+    });
+    return gtScriptPromise;
+  }
   function triggerGeetest() {
     return new Promise(function (resolve, reject) {
       var finished = false;
@@ -314,7 +335,10 @@ function renderCarrierPage(state: FlowState): string {
       // Unexpected token 'N'，"Not found" is not valid JSON（2026-10-22 用户实测）。
       // cnPost/cnPoll 的参数本来就是相对路径，唯独这里的原生 fetch 写成了绝对
       // —— 与 Loomy/Raccoon 页面的约定对齐。
-      fetch("gee-captcha").then(function (r) { return r.json(); }).then(function (json) {
+      ensureGeetestSdk().then(function () {
+        if (typeof window.initGeetest !== "function") throw new Error("安全验证组件不可用，请稍后重试。");
+        return fetch("gee-captcha");
+      }).then(function (r) { return r.json(); }).then(function (json) {
         if (!json.ok || !json.config) throw new Error(json.message || "获取安全验证配置失败");
         var c = json.config;
         window.initGeetest({

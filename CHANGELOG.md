@@ -2,6 +2,19 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.5] - 2026-10-22
+
+### Fixed
+
+- **AStudio 登录页点「完成安全验证」报 `window.initGeetest is not a function`
+  （用户实测，接 0.9.4）**。极验配置请求修好之后，暴露出下一层：页面头部静态
+  加载的 `gt.js`（极验官方 SDK）在用户浏览器里**没有加载成功**（弱网/代理抖动
+  皆可），而移植时漏掉了 JetHub 载体页的第二重保险。现按 JetHub 同款补上
+  `ensureGeetestSdk()` 动态兜底：用前检查 `typeof window.initGeetest ===
+  "function"`，缺失就重新注入脚本并等待加载，失败时 promise 复位、下次点击
+  可重试；加载后仍不可用才如实报「安全验证组件不可用」。静态标签保留
+  （与 JetHub 完全一致的双重加载）。
+
 ## [0.9.4] - 2026-10-22
 
 ### Fixed
