@@ -84,6 +84,14 @@ export const ASTUDIO_PATHS = Object.freeze({
   ssoUids: "/SSOService/wx/scanlogin/uids",
   /** SSO：确认绑定会话（表单 POST）。 */
   ssoBind: "/SSOService/wx/scanlogin/bind",
+  /** 极验（GeeTest）人机验证配置（无 Cookie；登录页拉起滑块用）。 */
+  geeCaptcha: "/chat/gee-captcha",
+  /** 短信验证码发送（multipart 表单 + 极验三参数）。 */
+  sendVerifyCode: "/login/mobile/send-verify-code",
+  /** 手机短信快速登录（multipart 表单；JetHub：未注册号码验证通过后自动注册开户）。 */
+  phoneQuickLogin: "/login/phone-quick-login",
+  /** 账号密码登录（multipart 表单 + 极验三参数）。 */
+  checkAccount: "/login/check-account",
 })
 
 /** 客户端自报类型：`21` = win32（实测取自客户端请求头；AStudio 是 Windows 独占应用）。 */

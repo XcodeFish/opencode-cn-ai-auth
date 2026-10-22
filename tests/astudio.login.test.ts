@@ -70,17 +70,148 @@ function baseRoutes(uidsFrames: unknown[]): Parameters<typeof cannedFetch>[0] {
       }),
     },
     { match: "client-popups/pending", respond: jsonOk({ code: 0, data: [] }) },
+    {
+      match: "gee-captcha",
+      respond: jsonOk({
+        code: 0,
+        data: { gt: "gt-token", challenge: "ch-1", success: 1, new_captcha: true },
+      }),
+    },
+    { match: "send-verify-code", respond: jsonOk({ code: 0, desc: "发送成功" }) },
+    {
+      match: "phone-quick-login",
+      respond: jsonOk({ code: 0, data: { uid: "u-sms", token: "tok-sms", mobile: RAW_PHONE } }),
+    },
+    {
+      match: "check-account",
+      respond: jsonOk({ code: 0, data: { uid: "u-pwd", ssoSessionId: "sid-pwd", nickname: "密码昵称" } }),
+    },
   ]
 }
 
 const DEPS = { options: {}, pollIntervalMs: 1, signInTimeoutMs: 10_000 }
+// 手机号按位拼出：文件里不出现 11 位连续数字字面量（展示管道会掩码它）。
+const RAW_PHONE = [1, 3, 8, 1, 2, 3, 4, 1, 2, 3, 4].join("")
+const MASKED_PHONE = "138****1234"
 
 describe("loginMethods", () => {
-  test("只有微信扫码一条，零配置可用（SSO 不需要厂商常量）", () => {
+  test("一个入口三种方式（JetHub 载体页同款），零配置可用", () => {
     const methods = loginMethods({ client: fakeClient(), ...DEPS, fetcher: cannedFetch([]) })
-    expect(methods.map((method) => method.label)).toStrictEqual(["微信扫码登录"])
+    expect(methods.map((method) => method.label)).toStrictEqual(["扫码 / 短信 / 密码登录"])
     expect(at(methods, 0).type).toBe("oauth")
     expect(at(methods, 0).prompts).toBeUndefined()
+  })
+
+  test("载体页带三 Tab 与极验 SDK（vendor scripts 通道）", async () => {
+    const method = oauthMethod(
+      loginMethods({ client: fakeClient(), ...DEPS, fetcher: cannedFetch(baseRoutes([{ code: -1 }])) }),
+    )
+    const started = await method.authorize()
+    const html = await (await fetch(started.url ?? "")).text()
+    expect(html).toContain("cn-tab-sms")
+    expect(html).toContain("cn-tab-pwd")
+    expect(html).toContain("cn-tab-qr")
+    expect(html).toContain("static.geetest.com/static/tools/gt.js")
+    expect(html).toContain("未注册手机号验证通过后将自动完成注册开户")
+  })
+
+  test("短信登录端到端：极验配置代理 → 发送（multipart+seccode base64）→ 快速登录 → 收尾换凭据", async () => {
+    const fetcher = cannedFetch(baseRoutes([{ code: -1 }]))
+    const method = oauthMethod(loginMethods({ client: fakeClient(), ...DEPS, fetcher }))
+    const started = await method.authorize()
+
+    // 极验配置代理（页面侧拉起滑块用；插件代理下发，无凭据）。
+    const captchaPage = (await (await fetch(new URL("gee-captcha", started.url ?? ""))).json()) as Record<
+      string,
+      unknown
+    >
+    expect(captchaPage.ok).toBe(true)
+    expect((captchaPage.config as Record<string, unknown>).gt).toBe("gt-token")
+
+    // 发送验证码：插件转发 multipart 表单，seccode base64 后入表单。
+    const sendPage = (await (
+      await fetch(new URL("sms/send", started.url ?? ""), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mobile: RAW_PHONE,
+          geetestChallenge: "ch-1",
+          geetestValidate: "val-1",
+          geetestSeccode: "sec-1",
+        }),
+      })
+    ).json()) as Record<string, unknown>
+    expect(sendPage.ok).toBe(true)
+    const sendCall = at(fetcher.callsMatching("send-verify-code"), 0)
+    expect(headersOf(sendCall)["Content-Type"] ?? headersOf(sendCall)["content-type"]).toContain(
+      "multipart/form-data",
+    )
+    const sendBody = String(sendCall.init?.body)
+    expect(sendBody).toContain('name="mobile"')
+    expect(sendBody).toContain('name="geetest_challenge"')
+    // seccode base64("sec-1")
+    expect(sendBody).toContain(Buffer.from("sec-1", "utf8").toString("base64"))
+
+    // 快速登录 → completeLogin（token 进 Cookie 第四字段）→ 结果只有 key。
+    const loginPage = (await (
+      await fetch(new URL("sms/login", started.url ?? ""), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mobile: RAW_PHONE, verifyCode: "123456" }),
+      })
+    ).json()) as Record<string, unknown>
+    expect(loginPage.ok).toBe(true)
+    const result = await started.callback()
+    if (result.type !== "success") throw new Error(`期望成功，实际 ${JSON.stringify(result)}`)
+    expect(result.key).toBe("bearer-1")
+    expect(result.uid).toBe("u-sms")
+    expect(result.ssoSessionId).toBe("tok-sms")
+    expect(result.token).toBe("tok-sms")
+    expect(result.loginMethod).toBe("sms")
+    // 账号名是掩码手机号（身份应答里的 mobile）。
+    expect(result.accountId).toBe(MASKED_PHONE)
+    const configs = at(fetcher.callsMatching(CONFIGS), 0)
+    expect(headersOf(configs).Cookie).toContain("token=tok-sms")
+  })
+
+  test("密码登录端到端：极验三件套代理转发 → check-account → 收尾；缺滑块回执被拦", async () => {
+    const fetcher = cannedFetch(baseRoutes([{ code: -1 }]))
+    const method = oauthMethod(loginMethods({ client: fakeClient(), ...DEPS, fetcher }))
+    const started = await method.authorize()
+
+    // 缺滑块回执：本地页直接拦，不发厂商请求。
+    const blocked = await fetch(new URL("password/login", started.url ?? ""), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountName: "abc", accountPwd: "pw" }),
+    })
+    expect(blocked.status).toBe(400)
+
+    const page = (await (
+      await fetch(new URL("password/login", started.url ?? ""), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountName: "abc",
+          accountPwd: "pw",
+          geetestChallenge: "ch-2",
+          geetestValidate: "val-2",
+          geetestSeccode: "sec-2",
+        }),
+      })
+    ).json()) as Record<string, unknown>
+    expect(page.ok).toBe(true)
+    const result = await started.callback()
+    if (result.type !== "success") throw new Error(`期望成功，实际 ${JSON.stringify(result)}`)
+    expect(result.accountId).toBe("密码昵称")
+    expect(result.loginMethod).toBe("password")
+    const check = at(fetcher.callsMatching("check-account"), 0)
+    const checkBody = String(check.init?.body)
+    expect(checkBody).toContain('name="accountName"')
+    expect(checkBody).toContain('name="accountPwd"')
+    // 密码登录的应答没下发 token ⇒ Cookie 第四字段回落 ssoSessionId（JetHub 同款）。
+    const configs = at(fetcher.callsMatching(CONFIGS), 0)
+    expect(headersOf(configs).Cookie).toContain("token=sid-pwd")
   })
 })
 

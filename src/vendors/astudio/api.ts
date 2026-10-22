@@ -16,14 +16,16 @@
  * 每个函数都接收 `fetcher`，测试用离线假 fetch 驱动，不发真实请求。
  */
 
-import { errorMessage } from "../../core/errors.ts"
+import { errorMessage, VendorError } from "../../core/errors.ts"
 import { type Fetcher, httpJson } from "../../core/http.ts"
 import { asArray, asObject, num, posInt, str, trimmedStr } from "../../core/json.ts"
+import { randomHex } from "../../core/util.ts"
 import {
   ASTUDIO_AUTH_BASE,
   ASTUDIO_CATALOG_BASE,
   ASTUDIO_CLIENT_TYPE,
   ASTUDIO_FD_ALPHABET,
+  ASTUDIO_ID,
   ASTUDIO_LOGIN_TIMEOUT_MS,
   ASTUDIO_PATHS,
   ASTUDIO_POPUP_DAILY_REWARD,
@@ -164,8 +166,10 @@ export interface Session {
   ssoSessionId?: string
   /** 账号后端 token（Cookie 第四字段；缺失时回落 ssoSessionId，见 `cookieHeader`）。 */
   token?: string
-  /** 昵称/手机号（展示用；手机号显示前必须掩码）。 */
+  /** 昵称（展示用；手机号显示前必须掩码）。 */
   nickname?: string
+  /** 手机号（短信登录下发；展示用，显示前必须掩码）。 */
+  mobile?: string
 }
 
 /**
@@ -457,8 +461,17 @@ export interface LoginIdentity {
   ssoSessionId: string
   /** 展示名（SSO `username` 或 userInfo 的昵称；手机号显示前必须掩码）。 */
   nickname?: string
-  /** 登录方式标记（`wechat`；仅展示与排障）。 */
+  /** 登录方式标记（`wechat` / `sms` / `password`；仅展示与排障）。 */
   loginMethod: string
+  /**
+   * 账号后端 token（Cookie 第四字段）。短信/密码登录的应答可能下发独立的
+   * `token`；缺失时回落 `ssoSessionId`（JetHub `completeAstudioLogin` 同款）。
+   */
+  token?: string
+  /** 账号 id（缺失时回落 `uid`）。 */
+  accountId?: string
+  /** 手机号（短信登录下发；仅展示，显示前必须掩码）。 */
+  mobile?: string
 }
 
 export type CompleteLoginResult =
@@ -477,8 +490,8 @@ export type CompleteLoginResult =
 export async function completeLogin(fetcher: Fetcher, identity: LoginIdentity): Promise<CompleteLoginResult> {
   const ssoSessionId = identity.ssoSessionId
   const uid = identity.uid
-  const accountId = uid
-  const control = { ssoSessionId, accountId, token: ssoSessionId }
+  const accountId = identity.accountId ?? uid
+  const control = { ssoSessionId, accountId, token: identity.token ?? ssoSessionId }
 
   try {
     await httpJson(fetcher, `${ASTUDIO_AUTH_BASE}${ASTUDIO_PATHS.initApp}`, {
@@ -517,8 +530,9 @@ export async function completeLogin(fetcher: Fetcher, identity: LoginIdentity): 
       accountId,
       uid,
       ssoSessionId,
-      token: ssoSessionId,
+      token: control.token,
       ...(nickname === undefined ? {} : { nickname }),
+      ...(identity.mobile === undefined ? {} : { mobile: identity.mobile }),
     },
   }
 }
@@ -985,4 +999,246 @@ function popupCredit(popup: ClaimablePopup, complete: Record<string, unknown> | 
     }
   }
   return 0
+}
+
+// ── 短信 / 密码登录（极验 GeeTest）─────────────────────────────────────────
+
+/** 极验初始化配置（页面侧 `initGeetest` 的入参）。 */
+export interface GeeTestConfig {
+  gt: string
+  challenge: string
+  success: boolean
+  newCaptcha: boolean
+}
+
+/** 页面完成滑块后的极验回执三件套。 */
+export interface GeeTestResult {
+  geetestChallenge: string
+  geetestValidate: string
+  geetestSeccode: string
+}
+
+/**
+ * multipart 表单体构造。四条登录端点都吃 multipart 表单（JetHub 用 FormData）；
+ * 字段全为 ASCII（手机号 / 国家码 / 极验 hex 与 base64 串），可安全按字符串拼装。
+ * `geetest_seccode` 与 JetHub 同款先 base64 再入表单。
+ */
+function multipartOf(fields: Record<string, string>): { body: string; contentType: string } {
+  const boundary = `----cn-ai-${randomHex(12)}`
+  const parts: string[] = []
+  for (const [name, value] of Object.entries(fields)) {
+    parts.push(`--${boundary}`, `Content-Disposition: form-data; name="${name}"`, "", value)
+  }
+  parts.push(`--${boundary}--`, "")
+  return { body: parts.join("\r\n"), contentType: `multipart/form-data; boundary=${boundary}` }
+}
+
+function vendorMessage(record: Record<string, unknown> | undefined, fallback: string): string {
+  const message = trimmedStr(record?.desc) ?? trimmedStr(record?.message) ?? trimmedStr(record?.msg)
+  return message ?? fallback
+}
+
+/** 业务码判据：`code` 缺席也算成功（JetHub 三条登录端点同款容错）。 */
+function businessOk(record: Record<string, unknown> | undefined): boolean {
+  const code = num(record?.code)
+  return code === undefined || code === 0
+}
+
+/**
+ * 拉极验配置 `GET /chat/gee-captcha?t=`（无 Cookie）。
+ * 成功信封 `{code:0|缺席, data:{gt, challenge, success, new_captcha}}`。
+ */
+export async function fetchGeetestConfig(
+  fetcher: Fetcher,
+): Promise<{ ok: true; config: GeeTestConfig } | { ok: false; message: string }> {
+  let result: Awaited<ReturnType<typeof httpJson>>
+  try {
+    result = await httpJson(fetcher, `${ASTUDIO_AUTH_BASE}${ASTUDIO_PATHS.geeCaptcha}?t=${Date.now()}`, {
+      headers: { Accept: "application/json" },
+      timeoutMs: ASTUDIO_LOGIN_TIMEOUT_MS,
+    })
+  } catch (error) {
+    return { ok: false, message: `获取安全验证配置失败（网络异常）：${errorMessage(error)}` }
+  }
+  if (!result.ok) {
+    return { ok: false, message: `获取安全验证配置失败（HTTP ${result.status}）` }
+  }
+  const record = asObject(result.json)
+  if (!businessOk(record)) {
+    return { ok: false, message: `获取安全验证配置失败：${vendorMessage(record, "业务码非 0")}` }
+  }
+  const data = asObject(record?.data) ?? record ?? {}
+  const gt = trimmedStr(data.gt)
+  const challenge = trimmedStr(data.challenge)
+  if (gt === undefined || challenge === undefined) {
+    return { ok: false, message: "安全验证配置响应缺失 gt 或 challenge 字段" }
+  }
+  const success = data.success === undefined ? true : data.success !== false && data.success !== 0
+  return {
+    ok: true,
+    config: { gt, challenge, success, newCaptcha: data.new_captcha === true },
+  }
+}
+
+/** 极验三件套完整性校验（发送短信与密码登录共用）。 */
+export function geeTestComplete(captcha: GeeTestResult): boolean {
+  return (
+    captcha.geetestChallenge.length > 0 &&
+    captcha.geetestValidate.length > 0 &&
+    captcha.geetestSeccode.length > 0
+  )
+}
+
+/**
+ * 发送短信验证码 `POST /login/mobile/send-verify-code`（multipart + 极验三件套，
+ * `geetest_seccode` base64 后入表单 —— 与 JetHub 逐字一致）。
+ */
+export async function sendSmsCode(
+  fetcher: Fetcher,
+  input: { mobile: string; countryCode?: string; captcha: GeeTestResult },
+): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
+  if (input.mobile.trim().length === 0) return { ok: false, message: "手机号不能为空" }
+  if (!geeTestComplete(input.captcha)) return { ok: false, message: "缺少安全验证参数，请先完成人机验证" }
+  const form = multipartOf({
+    mobile: input.mobile.trim(),
+    countryCode: input.countryCode ?? "86",
+    geetest_challenge: input.captcha.geetestChallenge,
+    geetest_validate: input.captcha.geetestValidate,
+    geetest_seccode: Buffer.from(input.captcha.geetestSeccode, "utf8").toString("base64"),
+  })
+  let result: Awaited<ReturnType<typeof httpJson>>
+  try {
+    result = await httpJson(fetcher, `${ASTUDIO_AUTH_BASE}${ASTUDIO_PATHS.sendVerifyCode}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": form.contentType },
+      body: form.body,
+      timeoutMs: ASTUDIO_LOGIN_TIMEOUT_MS,
+    })
+  } catch (error) {
+    return { ok: false, message: `发送短信验证码失败（网络异常）：${errorMessage(error)}` }
+  }
+  if (!result.ok) return { ok: false, message: `发送短信验证码失败（HTTP ${result.status}）` }
+  const record = asObject(result.json)
+  if (!businessOk(record)) {
+    return { ok: false, message: `发送短信验证码失败：${vendorMessage(record, "业务码非 0")}` }
+  }
+  return { ok: true, message: vendorMessage(record, "短信验证码已发送") }
+}
+
+/**
+ * 从短信/密码登录应答里取会话标识：`uid` 与 `ssoSessionId` **互为兜底**
+ * （`ssoSessionId` 缺失时还认 `token`；与扫码同款容错 —— 上游在部分路径下
+ * 只给其中一个，三入口口径不一致会让只有某一条登录失败）。
+ */
+function identityFrom(
+  record: Record<string, unknown>,
+  input: { loginMethod: string; mobile?: string; username?: string },
+): LoginIdentity {
+  const data = asObject(record.data) ?? record
+  const uid = trimmedStr(data.uid) ?? trimmedStr(data.account_id) ?? ""
+  const ssoSessionId = trimmedStr(data.ssoSessionId) ?? trimmedStr(data.token) ?? (uid.length > 0 ? uid : "")
+  if (uid.length === 0 && ssoSessionId.length === 0) {
+    throw new VendorError(ASTUDIO_ID, "登录响应缺少必要的会话标识（uid 或 ssoSessionId）")
+  }
+  const nickname = trimmedStr(data.nickname)
+  const mobile = trimmedStr(data.mobile) ?? input.mobile
+  return {
+    uid: uid.length > 0 ? uid : ssoSessionId,
+    ssoSessionId: ssoSessionId.length > 0 ? ssoSessionId : uid,
+    ...(nickname === undefined ? {} : { nickname }),
+    ...(mobile === undefined ? {} : { mobile }),
+    loginMethod: input.loginMethod,
+    ...(trimmedStr(data.token) === undefined ? {} : { token: trimmedStr(data.token) as string }),
+    ...(trimmedStr(data.accountId) === undefined && trimmedStr(data.account_id) === undefined
+      ? {}
+      : {
+          accountId: (trimmedStr(data.accountId) ?? trimmedStr(data.account_id)) as string,
+        }),
+  }
+}
+
+/**
+ * 手机短信快速登录 `POST /login/phone-quick-login`（multipart；**无极验** ——
+ * JetHub 同款，极验只在发送短信一步）。
+ */
+export async function loginWithSms(
+  fetcher: Fetcher,
+  input: { mobile: string; verifyCode: string; countryCode?: string },
+): Promise<{ ok: true; identity: LoginIdentity } | { ok: false; message: string }> {
+  if (input.mobile.trim().length === 0 || input.verifyCode.trim().length === 0) {
+    return { ok: false, message: "手机号和验证码不能为空" }
+  }
+  const form = multipartOf({
+    mobile: input.mobile.trim(),
+    verifyCode: input.verifyCode.trim(),
+    countryCode: input.countryCode ?? "86",
+  })
+  let result: Awaited<ReturnType<typeof httpJson>>
+  try {
+    result = await httpJson(fetcher, `${ASTUDIO_AUTH_BASE}${ASTUDIO_PATHS.phoneQuickLogin}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": form.contentType },
+      body: form.body,
+      timeoutMs: ASTUDIO_LOGIN_TIMEOUT_MS,
+    })
+  } catch (error) {
+    return { ok: false, message: `短信登录失败（网络异常）：${errorMessage(error)}` }
+  }
+  if (!result.ok) return { ok: false, message: `短信登录失败（HTTP ${result.status}）` }
+  const record = asObject(result.json)
+  if (!businessOk(record)) {
+    return { ok: false, message: `短信登录失败：${vendorMessage(record, "业务码非 0")}` }
+  }
+  if (record === undefined) return { ok: false, message: "登录响应不是 JSON 对象" }
+  try {
+    return { ok: true, identity: identityFrom(record, { loginMethod: "sms", mobile: input.mobile.trim() }) }
+  } catch (error) {
+    return { ok: false, message: errorMessage(error) }
+  }
+}
+
+/**
+ * 账号密码登录 `POST /login/check-account`（multipart + 极验三件套，seccode
+ * base64 后入表单 —— 与 JetHub 逐字一致）。
+ */
+export async function loginWithPassword(
+  fetcher: Fetcher,
+  input: { accountName: string; accountPwd: string; captcha: GeeTestResult },
+): Promise<{ ok: true; identity: LoginIdentity } | { ok: false; message: string }> {
+  if (input.accountName.trim().length === 0 || input.accountPwd.length === 0) {
+    return { ok: false, message: "账号与密码不能为空" }
+  }
+  if (!geeTestComplete(input.captcha)) return { ok: false, message: "缺少安全验证参数，请先完成人机验证" }
+  const form = multipartOf({
+    accountName: input.accountName.trim(),
+    accountPwd: input.accountPwd,
+    geetest_challenge: input.captcha.geetestChallenge,
+    geetest_validate: input.captcha.geetestValidate,
+    geetest_seccode: Buffer.from(input.captcha.geetestSeccode, "utf8").toString("base64"),
+  })
+  let result: Awaited<ReturnType<typeof httpJson>>
+  try {
+    result = await httpJson(fetcher, `${ASTUDIO_AUTH_BASE}${ASTUDIO_PATHS.checkAccount}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": form.contentType },
+      body: form.body,
+      timeoutMs: ASTUDIO_LOGIN_TIMEOUT_MS,
+    })
+  } catch (error) {
+    return { ok: false, message: `密码登录失败（网络异常）：${errorMessage(error)}` }
+  }
+  if (!result.ok) return { ok: false, message: `密码登录失败（HTTP ${result.status}）` }
+  const record = asObject(result.json)
+  if (!businessOk(record)) {
+    return { ok: false, message: `密码登录失败：${vendorMessage(record, "业务码非 0")}` }
+  }
+  if (record === undefined) return { ok: false, message: "登录响应不是 JSON 对象" }
+  try {
+    return {
+      ok: true,
+      identity: identityFrom(record, { loginMethod: "password", username: input.accountName.trim() }),
+    }
+  } catch (error) {
+    return { ok: false, message: errorMessage(error) }
+  }
 }

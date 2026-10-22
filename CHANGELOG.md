@@ -2,6 +2,20 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.3] - 2026-10-22
+
+### Added
+
+- **AStudio 登录页升级为三合一载体页（与 JetHub 载体页同款三 Tab）**：
+  微信扫码（讯飞公共 SSO，原有一条）/ **短信验证码**（`chat/gee-captcha` 拉极验
+  配置 → 页面滑块 → `login/mobile/send-verify-code` → `login/phone-quick-login`）/
+  **账号密码**（滑块 → `login/check-account`）。三个端点都吃 multipart 表单
+  （与 JetHub 的 FormData 逐字一致：极验三件套入表单、`geetest_seccode` 先 base64；
+  短信快速登录**无极验**；`code` 缺席也算成功）；会话标识解析与扫码同款互为兜底
+  （`ssoSessionId` → `token` → `uid`）。**未注册手机号验证通过后自动完成注册开户**
+  （收尾 `init-app` 同款）。页面只做 UI 与滑块，所有厂商请求由插件代理（页面拿不到
+  凭据）；`gt.js` 走 vendor scripts 通道。登录成功三条路都顺手领一次弹窗奖励。
+
 ## [0.9.2] - 2026-10-22
 
 ### Fixed

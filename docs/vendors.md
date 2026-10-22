@@ -720,19 +720,31 @@ Trae 也提供 OpenCode V2 子入口（`opencode/trae.ts`）。它与另两家�
 5. **失效码集合只登记实测过的 `{1002, 1005, 80000}`**：`80000` 是账号后端会话
    失效的真实形态（HTTP 200 + `{code:80000}`），客户端自己的失效码集合反而不含它。
 
-### 登录方式
+### 登录方式（三合一载体页，2026-10-22 与 JetHub 载体页对齐）
 
-| 方式 | 流程 | 依赖 |
+一个本地页三个 Tab，页面只做 UI 与极验滑块，**所有厂商请求由插件进程代理**
+（页面拿不到凭据）；三条路都汇入收尾三步（init-app 非阻塞 → userInfo（仅微信）→
+`bot/models/configs` 换 `api_key`）：
+
+| 方式 | 流程 | 极验 |
 |---|---|---|
-| 微信扫码登录 | 本包生成 8 位 `fd` → SSO `qrcode` 拿微信 ticket URL → 下载图片内联进本地页 → 2s 轮询 `uids`（`-1` 未扫码；`0` + 账号列表 = 已确认，`uid` 与 `ssoSessionId` **互为兜底**）→ `bind` → 收尾三步换凭据 | **无**（零配置；无需 AStudio 客户端、无需厂商常量） |
+| 微信扫码 | 本包生成 8 位 `fd` → SSO `qrcode` 拿微信 ticket URL → 下载图片内联进本地页 → 2s 轮询 `uids`（`-1` 未扫码；`0` + 账号列表 = 已确认，`uid` 与 `ssoSessionId` **互为兜底**）→ `bind` → 收尾换凭据 | 无 |
+| 短信验证码 | `GET /chat/gee-captcha` 拉配置 → 页面滑块（`initGeetest`，`product:"bind"`、`offline:!success`）→ `POST /login/mobile/send-verify-code`（multipart + 极验三件套，seccode base64）→ `POST /login/phone-quick-login`（multipart，**无极验**）→ 收尾换凭据 | 仅发送一步 |
+| 账号密码 | 页面滑块 → `POST /login/check-account`（multipart + 极验三件套，seccode base64）→ 收尾换凭据 | 登录一步 |
 
+- 三个端点都吃 **multipart 表单**（JetHub 用 FormData，本包手拼 ASCII multipart）；
+  `code` 缺席也算成功（JetHub 同款容错）。
+- **未注册手机号验证通过后自动完成注册开户**：收尾的 `POST /tenant-app/v2/init-app`
+  就是开户先手（JetHub 页面脚注同款说明）。
+- 极验滑块必须在浏览器里完成：配置由插件代理下发（无凭据），页面跑厂商公开的
+  `gt.js`（`static.geetest.com/static/tools/gt.js`），回执三件套
+  （challenge/validate/seccode）交回插件再转发厂商；`geetest_seccode` 先 base64
+  再入表单（JetHub 逐字一致）。
 - `code:0` 但列表为空 = **该微信号尚未开通 AStudio**（信封的 `desc:"成功"` 只是请求
   状态）：文案指向「先在 AStudio 客户端里登录并绑定手机号完成开通」，不叫用户重扫
   ——同一个号再扫还是空（JetHub 2026-10-20 报障实录）。
-- `uids` 的账号行在部分路径下只给 `token` 不给 `ssoSessionId`（或反之），三处解析
-  同一套互为兜底口径，不会只有扫码这一条登录失败。
-- 短信/密码登录（客户端的另外两条路）要过极验（GeeTest），本包第一版不接，
-  见未验证边界。
+- `uids` / 短信 / 密码三处应答的会话标识同一套互为兜底口径（`ssoSessionId` →
+  `token` → `uid`），不会只有某一条登录失败。
 
 ### 会话与续期
 
