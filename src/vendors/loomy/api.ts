@@ -15,7 +15,7 @@
 
 import { errorMessage, SignInExpiredError, VendorError } from "../../core/errors.ts"
 import { type Fetcher, httpBytes, httpJson } from "../../core/http.ts"
-import { asArray, asObject, num, str } from "../../core/json.ts"
+import { asArray, asObject, bool, num, str, stringList } from "../../core/json.ts"
 import { randomId } from "../../core/util.ts"
 import {
   LOOMY_ACCOUNT_BASE,
@@ -25,6 +25,7 @@ import {
   LOOMY_OK_CODE,
   LOOMY_ONBOARDING_TOTAL,
   LOOMY_PATHS,
+  LOOMY_PETWORK_FIRST_TIER,
   LOOMY_REQUEST_TIMEOUT_MS,
   LOOMY_SESSION_TTL_SECONDS,
   LOOMY_SIGNED_OUT_CODE,
@@ -604,6 +605,150 @@ export async function claimKnownTasks(
     ok: true,
     data: { claimed, skipped, earned: earnedOf(doneKeys), total: state.total, done: doneKeys.length },
   }
+}
+
+// ---- 宠物每日打工（pet-work）-------------------------------------------------
+
+/** 快照里的一个档位；`score` 是拿到该档所需的档位分，不是积分额。 */
+export interface LoomyPetWorkTier {
+  id: string
+  score: number
+}
+
+/**
+ * `GET /pet-work` 的读数（2026-10-23 实测形状）：
+ *
+ * ```
+ * { enabled, businessDate,
+ *   config: { version, dailyMaxPoints, tiers: [{ tierId, score }] },
+ *   status: { earnedPointsToday, rewardedTierIds, dailyRewardCapped } }
+ * ```
+ *
+ * ⚠️ 配置版本在快照里叫 `config.version`，领奖请求体里叫 `configVersion`：
+ * 两处拼写不同是服务端的形状，别顺手统一。
+ */
+export interface LoomyPetWork {
+  enabled: boolean
+  businessDate?: string
+  configVersion?: string
+  dailyMax?: number
+  tiers: LoomyPetWorkTier[]
+  earnedToday?: number
+  rewardedTiers: string[]
+  capped: boolean
+  /** 还没领到的最低档；undefined 表示今日没有可申请的档位。 */
+  nextTier?: string
+}
+
+/** 档位表：缺 `tierId` 或 `score` 的条目直接丢掉，不猜。 */
+function readTiers(value: unknown): LoomyPetWorkTier[] {
+  const list = asArray(value)
+  if (list === undefined) return []
+  const tiers: LoomyPetWorkTier[] = []
+  for (const item of list) {
+    const record = asObject(item)
+    const id = str(record?.tierId)
+    const score = num(record?.score)
+    if (id === undefined || score === undefined) continue
+    tiers.push({ id, score })
+  }
+  return tiers
+}
+
+/**
+ * 该申请哪一档：已发档位的下一个。
+ *
+ * 本包拿不到该账号的轮次统计，所以只能按「已发档位」推进：一次都没领就申请最低档
+ * （够不够由服务端判），全领完则不申请。拿不到档位表时不猜更高档 —— `tier_1` 已发
+ * 就视为完成。
+ */
+function nextTierOf(tiers: readonly LoomyPetWorkTier[], rewarded: readonly string[]): string | undefined {
+  const done = new Set(rewarded)
+  if (tiers.length === 0) return done.has(LOOMY_PETWORK_FIRST_TIER) ? undefined : LOOMY_PETWORK_FIRST_TIER
+  for (const tier of tiers) {
+    if (!done.has(tier.id)) return tier.id
+  }
+  return undefined
+}
+
+function readPetWork(data: Record<string, unknown> | undefined): LoomyPetWork {
+  const config = asObject(data?.config) ?? {}
+  const status = asObject(data?.status) ?? {}
+  const tiers = readTiers(config.tiers)
+  const rewardedTiers = stringList(status.rewardedTierIds)
+  const businessDate = str(data?.businessDate)
+  // 历史形状把配置版本平铺在 data 上，两条都读；都没有才让调用方用兜底常量。
+  const configVersion = str(config.version) ?? str(data?.configVersion)
+  const dailyMax = num(config.dailyMaxPoints)
+  const earnedToday = num(status.earnedPointsToday)
+  const nextTier = nextTierOf(tiers, rewardedTiers)
+  return {
+    enabled: bool(data?.enabled) === true,
+    tiers,
+    rewardedTiers,
+    capped: bool(status.dailyRewardCapped) === true,
+    ...(businessDate === undefined ? {} : { businessDate }),
+    ...(configVersion === undefined ? {} : { configVersion }),
+    ...(dailyMax === undefined ? {} : { dailyMax }),
+    ...(earnedToday === undefined ? {} : { earnedToday }),
+    ...(nextTier === undefined ? {} : { nextTier }),
+  }
+}
+
+/** 宠物打工的当日状态，只读。活动关闭时 `enabled` 为 false，其余字段可能缺。 */
+export async function fetchPetWork(fetcher: Fetcher, access: string): Promise<LoomyRead<LoomyPetWork>> {
+  const result = await productRead<Record<string, unknown>>(fetcher, access, LOOMY_PATHS.petWork)
+  if (!result.ok) return result
+  return { ok: true, data: readPetWork(result.data) }
+}
+
+/** 领奖回执（2026-10-23 实测「已领」形态：`duplicate: true` + `granted: false`）。 */
+export interface LoomyPetWorkGrant {
+  businessDate?: string
+  granted: boolean
+  duplicate: boolean
+  points?: number
+  grantedTiers: string[]
+  earnedToday?: number
+  capped: boolean
+}
+
+function readPetWorkGrant(data: Record<string, unknown> | undefined): LoomyPetWorkGrant {
+  const status = asObject(data?.status) ?? {}
+  const businessDate = str(data?.businessDate)
+  const points = num(data?.grantedPoints)
+  const earnedToday = num(status.earnedPointsToday)
+  return {
+    granted: bool(data?.granted) === true,
+    duplicate: bool(data?.duplicate) === true,
+    grantedTiers: stringList(data?.grantedTierIds),
+    capped: bool(status.dailyRewardCapped) === true,
+    ...(businessDate === undefined ? {} : { businessDate }),
+    ...(points === undefined ? {} : { points }),
+    ...(earnedToday === undefined ? {} : { earnedToday }),
+  }
+}
+
+/**
+ * 申请一档奖励。请求体只有服务端认的三个字段（`businessDate` / `configVersion` /
+ * `reachedTierId`）；`configVersion` 必须取自快照的 `config.version`，编一个版本号
+ * 会被服务端判过期。
+ */
+export async function claimPetWorkReward(
+  fetcher: Fetcher,
+  access: string,
+  input: { businessDate: string; configVersion: string; tierId: string },
+): Promise<LoomyRead<LoomyPetWorkGrant>> {
+  const result = await productRead<Record<string, unknown>>(fetcher, access, LOOMY_PATHS.petWorkRewards, {
+    method: "POST",
+    body: JSON.stringify({
+      businessDate: input.businessDate,
+      configVersion: input.configVersion,
+      reachedTierId: input.tierId,
+    }),
+  })
+  if (!result.ok) return result
+  return { ok: true, data: readPetWorkGrant(result.data) }
 }
 
 // ---- WeChat's own pages ------------------------------------------------------

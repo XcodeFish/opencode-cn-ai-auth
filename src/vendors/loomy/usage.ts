@@ -22,6 +22,7 @@
 
 import type { CheckinResult, UsageReport, UsageWindow } from "../../core/types.ts"
 import type { LoomyDailyGrant, LoomyOnboardingClaim, LoomyPoints } from "./api.ts"
+import type { PetWorkClaim } from "./petwork.ts"
 import { LOOMY_TASK_TITLES } from "./product.ts"
 
 /** The Beijing day's reset, as epoch milliseconds. */
@@ -173,18 +174,39 @@ export function usageReport(
  * like a daily quota. They are named in the message instead, and the outcome
  * only stays `claimed` when the day's own quota was handed out — finishing a
  * task is not the day's check-in.
+ *
+ * `petwork` is the pet-work reward, kept out of `credit` for the same reason:
+ * it is a separate pool with its own cap (1 000 a day), and reporting it as
+ * the day's quota would misstate both.
  */
-export function checkinResult(grant: LoomyDailyGrant, onboarding?: LoomyOnboardingClaim): CheckinResult {
+export function checkinResult(
+  grant: LoomyDailyGrant,
+  onboarding?: LoomyOnboardingClaim,
+  petwork?: PetWorkClaim,
+): CheckinResult {
   const quota = grant.dailyQuota
   const left = grant.daily
   const detail = quota === undefined ? "" : `（今日 ${left ?? 0}/${quota}）`
   const tasks = onboardingMessage(onboarding)
+  const pet = petWorkMessage(petwork)
   if (grant.alreadyProcessed) {
-    return { outcome: "done", credit: 0, message: `今日额度已初始化${detail}${tasks}` }
+    return { outcome: "done", credit: 0, message: `今日额度已初始化${detail}${tasks}${pet}` }
   }
   const consumed = grant.dailyConsumed
   const credit = quota === undefined ? 0 : consumed === undefined ? quota : Math.max(0, quota - consumed)
-  return { outcome: "claimed", credit, message: `今日额度已发放${detail}${tasks}` }
+  return { outcome: "claimed", credit, message: `今日额度已发放${detail}${tasks}${pet}` }
+}
+
+/**
+ * What to say about the pet-work claim, or nothing when it has nothing to say.
+ *
+ * A failed *read* carries no message on purpose (`petwork.ts`): "could not read
+ * the snapshot" is not a fact about the user's reward, and the check-in line is
+ * the wrong place to report a probe that failed.
+ */
+function petWorkMessage(claim: PetWorkClaim | undefined): string {
+  if (claim === undefined || claim.message === undefined) return ""
+  return `；${claim.message}`
 }
 
 /**

@@ -138,6 +138,7 @@ metadata。适配器在插件加载时注册回退模型、V2 integration 登录
 | 今日积分 | `dailyQuota − dailyConsumed`（`/points/records` 只给两个余额，`dailyQuota` 只有 `POST /points/first-login` 给） | 唯一参与路由的窗口：`used = consumed/quota`，重置时间取服务端 `dailyCycleDate`，缺失时用北京时间次日 00:05 |
 | 永久积分 | 同上 | `aside: true`：只展示，不参与路由 |
 | 新手任务 | `GET /onboarding/tasks` 的 8 个标记 | `aside: true`：只展示，不参与路由；8/8 领完时不显示这一行 |
+| 宠物打工 | `GET /pet-work` 的 `status`（今日累计、已发档位、是否封顶） | `aside: true`：只展示，不参与路由；封顶或活动关闭时不显示这一行 |
 
 **`dailyQuota` 只有 `POST /points/first-login` 会说**（2026-10-15 实测：
 `/points/records` 只回 `balance` / `dailyBalance` / `availableBalance`，**没有**
@@ -235,6 +236,72 @@ checkin`、Settings › Daily check-in › Plugins 的自动开关，三者都�
 - 只在**读到有未完成**时才尝试；读数 10 分钟缓存一次，所以最多 10 分钟一次尝试。
 - 领取是幂等的（已领完的账号 0 个请求）；被拒时停下、记下已领的部分，等读数过期再试。
 - `options.claimTasks: false` 关掉它，让 `usage` 回到严格只读。默认开启。
+
+### 宠物每日打工（0～1000 分，2026-10-23 接入）
+
+`GET /pet-work` 读当日快照，`POST /pet-work/rewards` 申请一档。这是 Loomy 唯一
+「按天算、要手动领」的积分：每天上限 1000 分，档位由服务端按**该账号当日在官方
+客户端的有效对话轮次**计算（`sessionWeight × sessionIndex + depthWeight ×
+depthIndex`，权重与基线都由快照的 `config` 下发，2026-10-23 读到 0.4 / 0.6、
+index 上限 2 / 2、采样 28 天、最少 7 个活跃日）。
+
+**实测形状**（2026-10-23，真账号只读探测；成功码仍是字符串 `"000000"`）：
+
+```json
+{ "enabled": true, "businessDate": "2026-10-23",
+  "config": { "version": "pet-work-v1", "dailyMaxPoints": 1000,
+              "tiers": [{ "tierId": "tier_1", "score": 60 },
+                        { "tierId": "tier_2", "score": 100 },
+                        { "tierId": "tier_3", "score": 150 }] },
+  "status": { "earnedPointsToday": 1000,
+              "rewardedTierIds": ["tier_1", "tier_2", "tier_3"],
+              "dailyRewardCapped": true,
+              "lastGrant": { "grantBatchId": "pwg_…", "grantedTierIds": ["tier_3"],
+                             "grantedPoints": 500, "rewardedAt": 1792698335 } } }
+```
+
+⚠️ **配置版本两处拼写不同**：快照里是 `config.version`，领奖请求体里是
+`configVersion`。把快照里的键名原样塞进请求体会被服务端判过期。
+
+**领奖请求**只有三个字段：`{ businessDate, configVersion, reachedTierId }`。
+`businessDate` 必须用快照里那个服务端业务日 —— 本机时钟猜的日期会被拒。
+
+**回执**（同一账号当天已封顶时的实测，即「已领」形态）：
+
+```json
+{ "businessDate": "2026-10-23", "grantBatchId": "", "granted": false,
+  "duplicate": true, "grantedPoints": 0, "grantedTierIds": [],
+  "status": { "earnedPointsToday": 1000, "rewardedTierIds": ["tier_1", "tier_2", "tier_3"],
+              "dailyRewardCapped": true } }
+```
+
+**档位怎么推进。** 本包拿不到该账号的轮次统计，只能按「已发档位」推进：一次都没领
+就申请 `tier_1`（够不够由服务端判），已发 `tier_1` 就申请 `tier_2`，全发完不再申请。
+拿不到档位表时不猜更高档：`tier_1` 已发即视为完成。**一次签到会把今天未领的档位逐档
+申请**（用户当天在官方客户端聊够了却一直没按签到，一档都不会漏），某档没达标就停手 ——
+档位按分数单调，这一档没到，更高的更不可能到；回执带回的 `grantedTierIds` 会并进
+「已领」，所以服务端若一次发多档也不会重复申请。
+
+**为什么只挂在 `auth.checkin`。** 达标由服务端按官方客户端的轮次算，本包是网关、
+不产生轮次归属 —— 每次领奖请求对「够不够档」毫无影响，只在用户当天已经攒够时把分
+收下来。收益是用户的，动作就落在用户按得下去的地方（`Check in now` / 每日自动签到 /
+`magpie accounts checkin`）。**不在 `usage` 里读到就领**：未达档位是常态，每次额度
+刷新都发一个注定被拒的 POST 只是白烧上游请求 —— 新手任务能那样做，是因为那 8 项
+服务端不校验前置行为、必然领得到。
+
+**卡片上那一行**（`petwork.ts`，`aside: true`，按账号缓存 10 分钟）：
+
+```
+宠物打工 今日 300/1000 · 已领 1/3 档
+宠物打工 今日 0/1000 · 未达档位
+```
+
+封顶（`dailyRewardCapped`）或活动关闭时不显示 —— 与新手任务 8/8 时不显示同一取舍。
+不带 `limit` / `amount`，否则卡片会把它画成「池子被花掉多少」的进度条，并让它参与选号。
+
+**未验证边界**：`granted: true` 的发放分支只在离线测试里按 `grantedPoints` 与
+「今日累计差分」两条路走过；真账号当天已封顶，只实测到 `duplicate: true` 这一种
+回执。首次真实领奖时核对 `grantedPoints` 是否等于 `earnedPointsToday` 的增量。
 
 ### 上下文窗口与图片能力的硬覆盖（2026-10-22 自 JetHub 移植）
 

@@ -14,7 +14,7 @@ import { gatedFetch } from "../../core/gate.ts"
 import { vendorLogger } from "../../core/log.ts"
 import { markFallback, toConfigModels, toModelRecord } from "../../core/models.ts"
 import { defineVendor, modelContextOf, type VendorContext } from "../../core/plugin.ts"
-import type { ModelRecord, UsageReport } from "../../core/types.ts"
+import type { ModelRecord, UsageReport, UsageWindow } from "../../core/types.ts"
 import {
   chatHeaders,
   claimDailyQuota,
@@ -26,6 +26,7 @@ import {
 import { lockedRefusal, rememberDailyBalance } from "./balance.ts"
 import { loginMethods } from "./login.ts"
 import { fallbackModels, modelsFrom } from "./models.ts"
+import { claimPetWork, petWorkStateFor, petWorkWindow } from "./petwork.ts"
 import { LOOMY_API_BASE, LOOMY_ICON, LOOMY_ID, LOOMY_NAME, LOOMY_SIGNED_OUT_CODE } from "./product.ts"
 import { accountLabel, rememberedQuota, rememberQuota, requireSession, sessionOf } from "./session.ts"
 import { claimTasksEnabled, forgetTaskReading, taskStateFor, tasksWindow } from "./tasks.ts"
@@ -116,10 +117,16 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
       // would have been (`tasks.ts`). `options.claimTasks: false` keeps this
       // read-only. A read that fails just leaves the line out.
       const state = await taskStateFor(fetch, auth, access, Date.now(), claimTasksEnabled(options))
+      const extraWindows: UsageWindow[] = []
       const tasks = tasksWindow(state?.data)
+      if (tasks !== undefined) extraWindows.push(tasks)
+      // 宠物打工只读一行进度；领奖挂在 `checkin`（为什么不在这一钩子里领，见
+      // `petwork.ts` 的文件头：未达档位是常态，读一次就写一次只是白烧请求）。
+      const petwork = petWorkWindow(await petWorkStateFor(fetch, auth, access))
+      if (petwork !== undefined) extraWindows.push(petwork)
       return usageReport(today, {
         ...(accountLabel(auth) === undefined ? {} : { user: accountLabel(auth) as string }),
-        ...(tasks === undefined ? {} : { extraWindows: [tasks] }),
+        ...(extraWindows.length === 0 ? {} : { extraWindows }),
       })
     },
 
@@ -162,7 +169,11 @@ export const LoomyAuthPlugin = defineVendor(({ client, options }) => {
       // reads the service again instead of showing "N/8 可领" for the rest of
       // the TTL right after the tasks were claimed (`tasks.ts`).
       forgetTaskReading(auth)
-      return checkinResult(grant.data, tasks.ok ? tasks.data : undefined)
+      // 宠物打工：档位由服务端按官方客户端的有效对话轮次算，这里只把已达档位的分
+      // 收下来。快照读失败只有 `detail`（进日志），不往签到文案里写「读不到」。
+      const petwork = await claimPetWork(fetch, access, auth)
+      if (petwork.detail !== undefined) await log.warn(petwork.detail)
+      return checkinResult(grant.data, tasks.ok ? tasks.data : undefined, petwork)
     },
   }
 })
