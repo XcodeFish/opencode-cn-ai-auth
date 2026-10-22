@@ -113,6 +113,10 @@ describe("loginMethods", () => {
     expect(html).toContain("cn-tab-qr")
     expect(html).toContain("static.geetest.com/static/tools/gt.js")
     expect(html).toContain("未注册手机号验证通过后将自动完成注册开户")
+    // 页面自取必须用相对路径：URL 带随机前缀，绝对路径会 404 "Not found"
+    //（2026-10-22 用户实测「Unexpected token 'N'」的根因）。
+    expect(html).toContain('fetch("gee-captcha")')
+    expect(html).not.toContain('fetch("/gee-captcha")')
   })
 
   test("短信登录端到端：极验配置代理 → 发送（multipart+seccode base64）→ 快速登录 → 收尾换凭据", async () => {

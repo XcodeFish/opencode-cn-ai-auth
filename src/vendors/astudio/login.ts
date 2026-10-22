@@ -309,7 +309,12 @@ function renderCarrierPage(state: FlowState): string {
         try { if (instance && instance.destroy) instance.destroy(); } catch (_) {}
         if ("payload" in result) resolve(result.payload); else reject(result.error);
       }
-      fetch("/gee-captcha").then(function (r) { return r.json(); }).then(function (json) {
+      // ⚠️ 必须用相对路径：本地页 URL 带随机前缀（/<token>/），绝对路径
+      // /gee-captcha 会把前缀丢掉，命中 404 "Not found" —— 页面报
+      // Unexpected token 'N'，"Not found" is not valid JSON（2026-10-22 用户实测）。
+      // cnPost/cnPoll 的参数本来就是相对路径，唯独这里的原生 fetch 写成了绝对
+      // —— 与 Loomy/Raccoon 页面的约定对齐。
+      fetch("gee-captcha").then(function (r) { return r.json(); }).then(function (json) {
         if (!json.ok || !json.config) throw new Error(json.message || "获取安全验证配置失败");
         var c = json.config;
         window.initGeetest({

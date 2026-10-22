@@ -2,6 +2,19 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的风格记录。
 
+## [0.9.4] - 2026-10-22
+
+### Fixed
+
+- **AStudio 登录页点「完成安全验证」报 `Unexpected token 'N', "Not found" is not
+  valid JSON`（用户实测）**。根因是**一行路径写法**：本地页 URL 带随机前缀
+  （`/2d4c2571…/`），页面里极验配置请求写成了**绝对路径** `fetch("/gee-captcha")`
+  —— 前缀被丢掉，命中 404 的 `Not found` 纯文本，`r.json()` 当场抛上面的错，
+  滑块永远拉不起来。运行时的 `cnPost`/`cnPoll` 参数本来就是相对路径（所以
+  发送/登录按钮不受影响），唯独这里的原生 fetch 写成了绝对。改为相对
+  `fetch("gee-captcha")`，并加回归护栏：渲染出的页面**不得**出现
+  `fetch("/gee-captcha")`。
+
 ## [0.9.3] - 2026-10-22
 
 ### Added
