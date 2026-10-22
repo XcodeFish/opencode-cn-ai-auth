@@ -312,6 +312,15 @@ function renderCarrierPage(state: FlowState): string {
   </div>`
 
   const script = `
+  // ── 自诊断：任何 CSP 拦截 / 脚本错误都写到状态条上，不再「点击没反应」──
+  document.addEventListener("securitypolicyviolation", function (e) {
+    cnStatus("cn-status", "被安全策略拦截：" + (e.blockedURI || e.violatedDirective || "未知资源"), "err");
+  });
+  window.addEventListener("error", function (e) {
+    cnStatus("cn-status", "页面脚本错误：" + (e.message || "未知错误"), "err");
+  });
+  cnStatus("cn-status", "请选择登录方式；短信 / 密码需先完成人机验证", "");
+
   var activeTab = "sms";
   function showTab(name) {
     activeTab = name;
@@ -368,7 +377,7 @@ function renderCarrierPage(state: FlowState): string {
     pending = true;
     btn.disabled = true;
     btn.textContent = "正在拉起验证…";
-    box.textContent = "";
+    box.textContent = "正在拉取安全验证…";
     cnStatus("cn-status", "正在准备安全验证…", "");
     function reset() {
       pending = false;
@@ -433,9 +442,15 @@ function renderCarrierPage(state: FlowState): string {
     });
   }
   var smsCaptcha = null, pwdCaptcha = null;
-  var smsCaptcha = null, pwdCaptcha = null;
-  setupCaptcha("cn-sms-captcha-btn", "cn-sms-captcha-box", function (c) { smsCaptcha = c; });
-  setupCaptcha("cn-pwd-captcha-btn", "cn-pwd-captcha-box", function (c) { pwdCaptcha = c; });
+  // 两个槽位的点击绑定（顶层 triggerGeetest；旧的 setupCaptcha 已随沙箱方案删除）
+  document.getElementById("cn-sms-captcha-btn").addEventListener("click", function () {
+    triggerGeetest("sms", "cn-sms-captcha-box").then(function (captcha) { smsCaptcha = captcha; })
+      .catch(function () { /* 失败原因已写在按钮旁与状态条 */ });
+  });
+  document.getElementById("cn-pwd-captcha-btn").addEventListener("click", function () {
+    triggerGeetest("pwd", "cn-pwd-captcha-box").then(function (captcha) { pwdCaptcha = captcha; })
+      .catch(function () { /* 失败原因已写在按钮旁与状态条 */ });
+  });
 
   // 短信：发送（需滑块回执）+ 登录。
   document.getElementById("cn-sms-send").addEventListener("click", function () {
