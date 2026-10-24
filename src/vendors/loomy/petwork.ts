@@ -94,6 +94,11 @@ export async function petWorkStateFor(
  *
  * `aside: true` 且不带 `limit` / `amount`：这一行只解释今天有没有分可领，不该被
  * 画成「池子被花掉多少」的进度条，也不该参与选号（封顶与否不是路由依据）。
+ *
+ * ⚠️ `earnedToday == 0` 只说明**还没领过**，不说明「未达档位」：快照里没有「已达档位」
+ * 这个字段（只有 `earnedPointsToday` / `rewardedTierIds` / `dailyRewardCapped`），
+ * 够不够档只有领奖回执才会说。写「未达档位」是拿没证据的结论骗人 —— 实测过：卡片显示
+ * 0/1000「未达档位」，紧接着签到领到 +1000，说明三档早就够了。
  */
 export function petWorkWindow(state: LoomyPetWork | undefined): UsageWindow | undefined {
   if (state === undefined || !state.enabled || state.capped) return undefined
@@ -101,7 +106,7 @@ export function petWorkWindow(state: LoomyPetWork | undefined): UsageWindow | un
   const parts = [state.dailyMax === undefined ? `今日 ${earned} 分` : `今日 ${earned}/${state.dailyMax}`]
   if (earned > 0 && state.tiers.length > 0)
     parts.push(`已领 ${state.rewardedTiers.length}/${state.tiers.length} 档`)
-  if (earned === 0) parts.push("未达档位")
+  if (earned === 0) parts.push("未领取")
   return {
     name: "宠物打工",
     used: 0,

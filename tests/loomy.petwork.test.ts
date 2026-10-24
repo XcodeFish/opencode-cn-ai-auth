@@ -314,7 +314,7 @@ describe("pet-work 领奖", () => {
 })
 
 describe("宠物打工的卡片行", () => {
-  test("一分没有时说清原因，且不参与选号", () => {
+  test("一分没有时只说「未领取」，不猜「未达档位」", () => {
     const window = petWorkWindow({
       enabled: true,
       businessDate: "2026-10-23",
@@ -328,7 +328,8 @@ describe("宠物打工的卡片行", () => {
     })
     expect(window?.aside).toBe(true)
     expect(window?.used).toBe(0)
-    expect(window?.display).toBe("宠物打工 今日 0/1000 · 未达档位")
+    // 快照没有「已达档位」字段：0 分只能说明还没领，说「未达档位」就是编结论。
+    expect(window?.display).toBe("宠物打工 今日 0/1000 · 未领取")
     // 不带 limit/amount：卡片不该把它画成「池子被花掉多少」。
     expect(window?.limit).toBeUndefined()
     expect(window?.amount).toBeUndefined()
