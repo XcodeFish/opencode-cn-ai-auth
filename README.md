@@ -179,7 +179,7 @@ magpie plugin options <插件名> '{"accessKeyId": "…", "accessKeySecret": "�
 | 思考档位 | 远端 `supported_reasoning_levels` 原样（`none` / `high` / `max`）；只声明远端下发过的档位 —— 上游对非法档位不报错、按最大档计费执行 | 厂商自己的档位（`none` / `low` / `medium` / `high` / `xhigh`）直接映射到宿主 variants | 只有「开 / 关」两态，宿主词汇用 `high` / `none`，在请求体里写成 `extra_body.thinking.type = enabled` / `disabled`（厂商唯一有效的通道；`reasoning_effort` 实测无效，因此插件不会把它当档位用） | 远端 `reasoning_effort_config.options` 的字符串原样作为档位（`light` / `high` / `extra_high` …）；它们是上游 wire 值，不做白名单转换 |
 | 用量卡片 | `points/balance` 的权威合计 + 会员/购买/赠送/星火分池（各自带到期展示）；无重置周期，全部 `aside`（只展示，不参与选号） | 三行：今日积分（参与选号）+ 永久积分（`aside`）+ 新手任务进度（`aside`，8/8 领完时不显示） | `GET /balance` 的 available / reward / daily / topup / monthly 分池展示；上限服务未公布，全部 `aside`（只展示，不参与选号） | `POST /pay/ide_user_ent_usage` 的**积分包**列表，剩余 = Σ(授予 − 已用)，另加一行签到状态；服务从不公布账号级上限，全部 `aside` |
 | 锁定永久积分 | `options.lockPermanent: true` 时，今日额度用完即拒绝请求（429，宿主把账号 bench 到窗口重置），不再悄悄花永久积分 | — | — |
-| 每日签到 | 有：`client-popups/pending` 空表即已领（零写请求），否则对每个可领弹窗 `complete`（每日签到 + 新手礼包一起领）；登录成功后顺手领一次 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 | 有：先查 `checkin_credits/status`（已领就不发写请求），再 `checkin_credits/claim`；claim 响应不含积分数，成功后再查一次 status 取实际所得。签到按**设备**每日一次，`9074` 如实报失败、不换设备重试 |
+| 每日签到 | 有：`client-popups/pending` 空表即已领（零写请求），否则对每个可领弹窗 `complete`（每日签到 + 新手礼包一起领）；登录成功后顺手领一次 | 有：`POST /points/first-login`（幂等，返回当日额度），并在同一次签到里顺手补领没领完的**新手任务**（8 项 / 10000 分，纯 API 直领、不花模型 token；领完的账号零额外请求）与**宠物打工**奖励（每天 0～1000 分，档位按官方客户端的有效对话轮次算，未达档位如实上报） | 没有：每日 300 积分由服务端自动发放、没有端点，因此插件不做签到 | 有：先查 `checkin_credits/status`（已领就不发写请求），再 `checkin_credits/claim`；claim 响应不含积分数，成功后再查一次 status 取实际所得。签到按**设备**每日一次，`9074` 如实报失败、不换设备重试 |
 - **新手任务（Loomy）**：宿主没有一次性奖励钩子，也不给插件任何按钮，所以本包把领取
   挂在两处：`auth.checkin`（`Check in now` / `magpie accounts checkin` / 每日自动签到
   都会顺手领），以及 `auth.usage`——**卡片读到还有未完成就自动领掉**，用户不用点任何
@@ -421,7 +421,8 @@ bun run verify  # 改动完成前必须全绿
 
 - Raccoon 的「桌面端登录奖励」是三千里程碑式的一次性奖励，magpie 没有对应钩子（它既不是每日签到、也不该在后台偷偷代领），所以本包不实现；请到官方客户端领取。
 - Loomy 的「新手任务」10000 分随每日签到一起领（宿主的 `auth.checkin` 是唯一写钩子；任务领取是纯 API 直领，服务端不校验前置行为）。已领完的账号不产生额外请求。
-- 额度读取默认只读，例外是 Loomy 的新手任务：`auth.usage` 读到还有未完成时会把它们领掉（宿主的卡片不给插件按钮，这是唯一入口；`options.claimTasks: false` 可关掉）。会写远端状态的调用：Loomy 的每日额度领取与新手任务补领（`auth.checkin` + `auth.usage`）、TRAE 的每日签到领取，以及 Raccoon / TRAE 的 token 续期。
+- Loomy 的「宠物打工」每天 0～1000 分，档位由服务端按**官方客户端的有效对话轮次**计算：本包只把已达档位的分收下来，未达档位时如实说「未达档位」，不冒充领到。额度卡片上有一行只读进度（`aside`），封顶或活动关闭时不显示。
+- 额度读取默认只读，例外是 Loomy 的新手任务：`auth.usage` 读到还有未完成时会把它们领掉（宿主的卡片不给插件按钮，这是唯一入口；`options.claimTasks: false` 可关掉）。会写远端状态的调用：Loomy 的每日额度领取、新手任务补领与宠物打工领奖（`auth.checkin`；新手任务另有 `auth.usage`）、TRAE 的每日签到领取，以及 Raccoon / TRAE 的 token 续期。
 - 短信登录依赖厂商自己的验证码链路（Raccoon 的阿里云滑块脚本来自其 CDN），离线或脚本被拦截时只有扫码可用。
 - TRAE 走的是逆向的私有接口，不是厂商公开 API；它的签到按**设备**每日一次（换账号不重置），失败时如实告知而不轮换设备重试。
 - 三家厂商都还没在 magpie 内跑过真实登录与真实聊天；当前证据是 `plugin add` 级别的加载与形状检查。逐条未验证边界登记在 `docs/vendors.md` §5（Trae 另有 §5 第 11–15 条）。

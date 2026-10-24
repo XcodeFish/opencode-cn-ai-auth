@@ -11,6 +11,7 @@ import { SignInExpiredError } from "../src/core/errors.ts"
 import type { ConfigProvider, Hooks, ProviderInfo } from "../src/core/types.ts"
 import { forgetDailyBalances, rememberDailyBalance } from "../src/vendors/loomy/balance.ts"
 import { LoomyAuthPlugin } from "../src/vendors/loomy/index.ts"
+import { forgetPetWorkReadings } from "../src/vendors/loomy/petwork.ts"
 import { forgetTaskReadings } from "../src/vendors/loomy/tasks.ts"
 import { cannedFetch, fakeClient, jsonFail, jsonOk, providerOf, rejectionError } from "./helpers.ts"
 
@@ -390,6 +391,120 @@ describe("checkin 的接线", () => {
     const error = await withFetch(fetcher, () => rejectionError(() => checkin(async () => AUTH, PROVIDER)))
     expect(error).toBeInstanceOf(SignInExpiredError)
     expect(error.message).toBe("loomy: 新手任务被拒绝：缺少 token")
+  })
+})
+
+describe("宠物打工的接线", () => {
+  const DAILY = jsonOk({
+    code: "000000",
+    desc: "成功",
+    data: { alreadyProcessed: false, dailyQuota: 5000, dailyConsumed: 1000, dailyBalance: 4000 },
+  })
+  const ALL_TASKS = jsonOk({
+    code: "000000",
+    desc: "成功",
+    data: {
+      tasks: {
+        first_message: true,
+        pick_skill: true,
+        generate_ppt: true,
+        set_schedule: true,
+        install_skill: true,
+        configure_remote: true,
+        create_soul: true,
+        share_soul: true,
+      },
+      earned: 10_000,
+      total: 10_000,
+    },
+  })
+  const SNAPSHOT = (
+    earned: number,
+    rewarded: string[],
+    tiers: { tierId: string; score: number }[] = [
+      { tierId: "tier_1", score: 60 },
+      { tierId: "tier_2", score: 100 },
+      { tierId: "tier_3", score: 150 },
+    ],
+  ) =>
+    jsonOk({
+      code: "000000",
+      desc: "成功",
+      data: {
+        enabled: true,
+        businessDate: "2026-10-23",
+        config: { version: "pet-work-v1", dailyMaxPoints: 1000, tiers },
+        status: { earnedPointsToday: earned, rewardedTierIds: rewarded, dailyRewardCapped: false },
+      },
+    })
+
+  async function withFetch<T>(fetcher: ReturnType<typeof cannedFetch>, run: () => Promise<T>): Promise<T> {
+    const original = globalThis.fetch
+    globalThis.fetch = fetcher
+    try {
+      return await run()
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+
+  test("签到顺手领掉已达档位的宠物打工奖励，分不进 credit", async () => {
+    const fetcher = cannedFetch([
+      {
+        match: "/pet-work/rewards",
+        respond: jsonOk({
+          code: "000000",
+          desc: "成功",
+          data: {
+            businessDate: "2026-10-23",
+            grantBatchId: "pwg_1",
+            granted: true,
+            duplicate: false,
+            grantedPoints: 200,
+            grantedTierIds: ["tier_1"],
+            status: { earnedPointsToday: 200, rewardedTierIds: ["tier_1"], dailyRewardCapped: false },
+          },
+        }),
+      },
+      { match: "/pet-work", respond: SNAPSHOT(0, [], [{ tierId: "tier_1", score: 60 }]) },
+      { match: "/onboarding/tasks", respond: ALL_TASKS },
+      { match: "/points/first-login", respond: DAILY },
+    ])
+    const hooks = await loomyHooks()
+    const checkin = hooks.auth.checkin
+    if (checkin === undefined) throw new Error("loomy 必须有 checkin 钩子")
+    const result = await withFetch(fetcher, () => checkin(async () => AUTH, PROVIDER))
+
+    // credit 只算当日额度（5000−1000）；宠物打工的 200 分是另一个池子。
+    expect(result.credit).toBe(4000)
+    expect(result.message).toContain("宠物打工奖励 +200 分")
+    expect(fetcher.callsMatching("/pet-work/rewards")).toHaveLength(1)
+  })
+
+  test("额度卡片多一行 aside 的宠物打工进度", async () => {
+    forgetTaskReadings()
+    forgetPetWorkReadings()
+    const fetcher = cannedFetch([
+      {
+        match: "/points/records",
+        respond: jsonOk({
+          code: "000000",
+          data: { balance: 500, dailyBalance: 4000, availableBalance: 4500 },
+        }),
+      },
+      { match: "/onboarding/tasks", respond: ALL_TASKS },
+      { match: "/pet-work", respond: SNAPSHOT(300, ["tier_1"]) },
+    ])
+    const hooks = await loomyHooks({ claimTasks: false })
+    const usage = hooks.auth.usage
+    if (usage === undefined) throw new Error("loomy 必须有 usage 钩子")
+    const report = await withFetch(fetcher, () =>
+      usage(async () => ({ ...AUTH, dailyQuota: 5000, dailyCycleDate: "2026-10-23" }), PROVIDER),
+    )
+    const petwork = report.windows?.find((window) => window.name === "宠物打工")
+    expect(petwork?.aside).toBe(true)
+    expect(petwork?.display).toBe("宠物打工 今日 300/1000 · 已领 1/3 档")
+    expect(report.windows?.map((window) => window.name)).toStrictEqual(["今日积分", "永久积分", "宠物打工"])
   })
 })
 

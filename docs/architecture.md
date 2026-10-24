@@ -283,6 +283,10 @@ Loomy 的当日上限只有签到应答会说，因此签到与 usage 都把它�
 （`usage.ts` 的 `quotaForNow`）；属于已经重置那一天的上限会被丢掉，不带到
 新的一天。
 
+Loomy 的宠物打工奖励（`/pet-work`）**只挂在 `auth.checkin`**：档位由服务端按官方
+客户端的对话轮次算，本包不产生轮次归属，读一次就写一次只会白烧上游请求；卡片上那
+一行是只读的 `aside` 窗口（`petwork.ts`）。
+
 **续期**：只有 Raccoon 有（`auth.refresh` + `refreshLead`）。Loomy 没有续期端点，
 到点由宿主标记失效、用户重新登录——不实现假的续期。
 

@@ -320,6 +320,8 @@ export const LOOMY_PATHS = Object.freeze({
   firstLogin: "/points/first-login",
   onboardingTasks: "/onboarding/tasks",
   onboardingComplete: "/onboarding/tasks/complete",
+  petWork: "/pet-work",
+  petWorkRewards: "/pet-work/rewards",
 })
 
 /**
@@ -367,3 +369,26 @@ export const LOOMY_TASK_TITLES: Readonly<Record<string, string>> = Object.freeze
   create_soul: "创建你的第一个搭子",
   share_soul: "把搭子分享给朋友",
 })
+
+/**
+ * 宠物每日打工（pet-work）：Loomy 唯一「按天算、要手动领」的积分，每天 0～1000 分。
+ *
+ * 档位由服务端按**该账号当日在官方客户端的有效对话轮次**计算
+ * （`sessionWeight × sessionIndex + depthWeight × depthIndex`，见快照 `config`），
+ * 本包只提交「业务日 + 配置版本 + 已达档位」，是否达标由服务端判。
+ *
+ * ⚠️ 两处拼写不同，别顺手统一：快照里配置版本是 `config.version`，而领奖请求体
+ * 的字段**是** `configVersion`（2026-10-23 实测，见 `docs/vendors.md`）。
+ */
+export const LOOMY_PETWORK_CONFIG_VERSION = "pet-work-v1"
+
+/** 拿不到快照档位表时的兜底档位；服务端只认它自己的档位 id。 */
+export const LOOMY_PETWORK_FIRST_TIER = "tier_1"
+
+/**
+ * 卡片读数的缓存时长。
+ *
+ * 进度只在官方客户端产生新轮次、或本包领奖之后变化，而 `usage` 每轮额度刷新都会
+ * 跑，10 分钟一次足够（与新手任务同一口径）。
+ */
+export const LOOMY_PETWORK_TTL_MS = 10 * 60 * 1000
